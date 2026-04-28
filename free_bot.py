@@ -26,6 +26,12 @@ ADMINS = [int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.str
 SUPPORT_LINK      = "https://t.me/Uzeron_Ads_support"
 CONTACT_USERNAME  = "@Pandaysubscription"
 PREMIUM_BOT       = "@Uzeron_AdsBot"
+UPDATES_CHANNEL   = "https://t.me/Uzeron_Ads"
+HOW_TO_USE        = "https://t.me/Uzeron_Ads"
+
+# Force-join: users must be a member of this channel to use the bot
+# Set FORCE_JOIN_CHANNEL in env (e.g. "@Uzeron_Ads") or leave blank to disable
+FORCE_JOIN_CHANNEL = os.getenv('FORCE_JOIN_CHANNEL', '@Uzeron_Ads')
 
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -46,38 +52,133 @@ FREE_WARNINGS_BEFORE_BAN = 3
 def make_keyboard(buttons):
     return {"inline_keyboard": buttons}
 
-def dashboard_keyboard():
+def force_join_keyboard():
     return make_keyboard([
-        [{"text": "👤 My Account",  "callback_data": "account"},
-         {"text": "📊 Status",      "callback_data": "status"}],
-        [{"text": "💬 Set Message", "callback_data": "setmessage"},
-         {"text": "⏱️ Delay: 60s | Cycle: 10m", "callback_data": "delay_info"}],
-        [{"text": "🚀 Start Campaign", "callback_data": "startcampaign"},
-         {"text": "🛑 Stop Campaign",  "callback_data": "stopcampaign"}],
-        [{"text": "🔑 Login",           "callback_data": "login"},
-         {"text": "💎 Upgrade Premium", "callback_data": "upgrade"}],
-        [{"text": "🚪 Logout", "callback_data": "logout"}]
+        [{"text": "📢 Join Channel — Required", "url": UPDATES_CHANNEL}],
+        [{"text": "✅ I've Joined — Continue",  "callback_data": "check_join"}]
     ])
 
-def welcome_keyboard():
+def dashboard_keyboard():
     return make_keyboard([
-        [{"text": "🆓 Use Free Bot",  "callback_data": "free_info"}],
-        [{"text": "💎 Get Premium",   "callback_data": "upgrade"},
-         {"text": "📢 Support",       "url": SUPPORT_LINK}]
+        [{"text": "👤 My Account",               "callback_data": "account"},
+         {"text": "📊 Campaign Status",           "callback_data": "status"}],
+        [{"text": "✍️ Set Ad Message",            "callback_data": "setmessage"},
+         {"text": "⏱ 60s  |  🔄 10m Cycle",     "callback_data": "delay_info"}],
+        [{"text": "🚀 Start Campaign",            "callback_data": "startcampaign"},
+         {"text": "🛑 Stop Campaign",             "callback_data": "stopcampaign"}],
+        [{"text": "🔑 Login Account",             "callback_data": "login"},
+         {"text": "💎 Go Premium",                "callback_data": "upgrade"}],
+        [{"text": "📢 Updates",                   "url": UPDATES_CHANNEL},
+         {"text": "📖 How To Use",               "url": HOW_TO_USE}],
+        [{"text": "🚪 Logout",                    "callback_data": "logout"}]
     ])
 
 def back_keyboard():
-    return make_keyboard([[{"text": "🏠 Dashboard", "callback_data": "dashboard"}]])
+    return make_keyboard([[{"text": "🏠 Back to Dashboard", "callback_data": "dashboard"}]])
 
 def upgrade_keyboard():
     return make_keyboard([
-        [{"text": "💎 Upgrade Now → " + CONTACT_USERNAME,
+        [{"text": "💎 Upgrade Now — " + CONTACT_USERNAME,
           "url": "https://t.me/Pandaysubscription"}],
-        [{"text": "📢 Support Channel", "url": SUPPORT_LINK}],
+        [{"text": "📢 Support",  "url": SUPPORT_LINK},
+         {"text": "📖 How To Use", "url": HOW_TO_USE}],
         [{"text": "🔙 Back", "callback_data": "dashboard"}]
     ])
 
-# ── NEW: inline numeric keypad for OTP entry ──────────────────────────────────
+# ── FORCE JOIN CHECK via Bot API ─────────────────────────────────────────────
+def check_user_joined(user_id: int) -> bool:
+    """Returns True if user is a member of FORCE_JOIN_CHANNEL, False otherwise."""
+    if not FORCE_JOIN_CHANNEL:
+        return True
+    try:
+        channel = FORCE_JOIN_CHANNEL.lstrip('@')
+        url  = f"https://api.telegram.org/bot{FREE_BOT_TOKEN}/getChatMember"
+        resp = requests.get(url, params={"chat_id": f"@{channel}", "user_id": user_id},
+                            timeout=8)
+        data = resp.json()
+        status = data.get("result", {}).get("status", "")
+        return status in ("member", "administrator", "creator")
+    except Exception as e:
+        print(f"Force-join check error: {e}")
+        return True   # fail-open so a network blip doesn't lock everyone out
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ============================================
+# MESSAGE TEMPLATES
+# ============================================
+def force_join_text():
+    return (
+        "👋 <b>Welcome to Uzeron AdsBot!</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📢 <b>One quick step before we begin:</b>\n\n"
+        "You must join our official channel to use this bot.\n"
+        "It's where we post updates, tips & announcements.\n\n"
+        "1️⃣  Tap <b>Join Channel</b> below\n"
+        "2️⃣  Come back and tap <b>I've Joined</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+def welcome_text():
+    return (
+        "🆓 <b>UZERON ADSBOT — Free Plan</b>\n\n"
+        "╔══════════════════════╗\n"
+        "║  ✦ 100 Groups Max\n"
+        "║  ✦ 60s Message Delay\n"
+        "║  ✦ 10 min Cycle Delay\n"
+        "║  ✦ 8 Hours Daily Runtime\n"
+        "║  ✦ Account Branding Required\n"
+        "╚══════════════════════╝\n\n"
+        "💎 <b>Upgrade to Premium for:</b>\n"
+        "  • Unlimited groups & runtime\n"
+        "  • Custom delays\n"
+        "  • No branding\n"
+        "  • Message rotation\n"
+        "  • Auto schedule\n\n"
+        "Use /start to open your dashboard"
+    )
+
+def dashboard_text(user, runtime_used):
+    phone      = f"<code>{user[1]}</code>" if user and user[1] else "❌ Not connected"
+    msg_status = "✅  Set & Ready"  if user and user[5] else "❌  Not set"
+    campaign   = "🟢  Running"     if user and user[6] else "🔴  Stopped"
+    hours_used = runtime_used / 3600
+    hours_left = max(0, 8 - hours_used)
+    bar_filled = int((hours_used / 8) * 10)
+    bar        = "█" * bar_filled + "░" * (10 - bar_filled)
+    return (
+        "⚡ <b>UZERON ADSBOT  •  Free Plan</b>\n"
+        "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+        f"📱  <b>Account</b>      {phone}\n"
+        f"✉️   <b>Ad Message</b>  {msg_status}\n"
+        f"⏱   <b>Delay</b>       60s  │  🔄 Cycle: 10m\n"
+        f"📡  <b>Campaign</b>    {campaign}\n\n"
+        f"⏳  <b>Runtime Today</b>\n"
+        f"     [{bar}]  {hours_used:.1f}h / 8h\n"
+        f"     🕐 Time Left: <b>{hours_left:.1f}h</b>\n\n"
+        "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n"
+        "⚠️  <i>Free Plan: max 100 groups, 8hr/day</i>"
+    )
+
+def upgrade_text():
+    return (
+        "💎 <b>UPGRADE TO PREMIUM</b>\n\n"
+        "Unlock the full power of Uzeron!\n\n"
+        "╔══════════════════════╗\n"
+        "║  🚀  Unlimited Groups\n"
+        "║  ⏱   Custom Delays (30 / 45 / 60s)\n"
+        "║  🔀  Message Rotation (3 msgs)\n"
+        "║  ⏰  Auto Schedule (IST)\n"
+        "║  🏷   No Account Branding\n"
+        "║  📊  Campaign Analytics\n"
+        "║  🛡   24 / 7 Priority Support\n"
+        "╚══════════════════════╝\n\n"
+        "📦 <b>Plans Available:</b>\n"
+        "  🥉  Starter  —  7 Days\n"
+        "  🥈  Growth   —  15 Days\n"
+        "  🥇  Pro      —  30 Days\n\n"
+        f"👤  Contact: <b>{CONTACT_USERNAME}</b>\n"
+        f"🤖  Premium Bot: <b>{PREMIUM_BOT}</b>"
+    )
 def otp_keypad_keyboard(digits_so_far: str):
     """
     Renders a numeric keypad.
@@ -550,6 +651,11 @@ class UzeronFreeBot:
                          f"Upgrade to premium to continue:\n{CONTACT_USERNAME}",
                          upgrade_keyboard())
                 return
+            # ── Force-join gate ───────────────────────────────────────────────
+            if not check_user_joined(uid):
+                send_msg(uid, force_join_text(), force_join_keyboard())
+                return
+            # ─────────────────────────────────────────────────────────────────
             self.db.register_user(uid, username)
             user    = self.db.get_user(uid)
             runtime = self.db.get_runtime_today(uid)
@@ -571,11 +677,26 @@ class UzeronFreeBot:
             runtime = self.db.get_runtime_today(uid) if user else 0
 
             # ── standard dashboard buttons (unchanged) ────────────────────
-            if data == 'dashboard':
+            if data == 'check_join':
+                # User claims they've joined — re-verify
+                if not check_user_joined(uid):
+                    edit_msg(uid, mid,
+                             "❌ <b>Not joined yet!</b>\n\n"
+                             "Please join the channel first, then tap <b>I've Joined</b>.",
+                             force_join_keyboard())
+                    return
+                # Joined — register and show dashboard
+                self.db.register_user(uid, getattr(
+                    await self.bot.get_entity(uid), 'username', None))
+                user    = self.db.get_user(uid)
+                runtime = self.db.get_runtime_today(uid) if user else 0
+                edit_msg(uid, mid, dashboard_text(user, runtime), dashboard_keyboard())
+
+            elif data == 'dashboard':
                 edit_msg(uid, mid, dashboard_text(user, runtime), dashboard_keyboard())
 
             elif data == 'free_info':
-                edit_msg(uid, mid, welcome_text(), welcome_keyboard())
+                edit_msg(uid, mid, welcome_text(), back_keyboard())
 
             elif data == 'upgrade':
                 edit_msg(uid, mid, upgrade_text(), upgrade_keyboard())
@@ -588,41 +709,52 @@ class UzeronFreeBot:
 
             elif data == 'account':
                 phone     = user[1] if user and user[1] else "Not connected"
-                connected = "✅ Connected"    if user and user[4]  else "❌ Not connected"
-                branding  = "✅ Set"          if user and user[11] else "⏳ Pending"
+                connected = "✅  Connected"   if user and user[4]  else "❌  Not connected"
+                branding  = "✅  Active"      if user and user[11] else "⏳  Pending"
                 edit_msg(uid, mid,
-                         f"👤 <b>My Account</b>\n\n"
-                         f"📱 Phone: <code>{phone}</code>\n"
-                         f"🔗 Status: {connected}\n"
-                         f"🏷️ Branding: {branding}",
+                         "👤 <b>My Account</b>\n"
+                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+                         f"📱  <b>Phone</b>     <code>{phone}</code>\n"
+                         f"🔗  <b>Status</b>    {connected}\n"
+                         f"🏷   <b>Branding</b>  {branding}\n\n"
+                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰",
                          make_keyboard([
                              [{"text": "🔑 Login",   "callback_data": "login"},
                               {"text": "🚪 Logout",  "callback_data": "logout"}],
-                             [{"text": "🏠 Dashboard", "callback_data": "dashboard"}]
+                             [{"text": "🏠 Back to Dashboard", "callback_data": "dashboard"}]
                          ]))
 
             elif data == 'status':
-                s = "🟢 Live" if user and user[6] else "🔴 Stopped"
+                s = "🟢  Running" if user and user[6] else "🔴  Stopped"
                 msg_preview = (
-                    (user[5][:60] + '...') if user and user[5] and len(user[5]) > 60
+                    (user[5][:60] + '…') if user and user[5] and len(user[5]) > 60
                     else (user[5] if user else "Not set") or "Not set"
                 )
                 hours_used = runtime / 3600
+                bar_filled = int((hours_used / 8) * 10)
+                bar = "█" * bar_filled + "░" * (10 - bar_filled)
                 edit_msg(uid, mid,
-                         f"📊 <b>Campaign Status</b>\n\n"
-                         f"📱 Phone: <code>{user[1] if user and user[1] else 'Not set'}</code>\n"
-                         f"💬 Message: {msg_preview}\n"
-                         f"📡 Status: {s}\n"
-                         f"⏳ Runtime Today: {hours_used:.1f}h / 8h\n"
-                         f"🔢 Max Groups: {FREE_MAX_GROUPS}",
+                         "📊 <b>Campaign Status</b>\n"
+                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+                         f"📱  <b>Account</b>     <code>{user[1] if user and user[1] else 'Not set'}</code>\n"
+                         f"✉️   <b>Message</b>     <i>{msg_preview}</i>\n"
+                         f"📡  <b>Status</b>      {s}\n"
+                         f"🔢  <b>Max Groups</b>  {FREE_MAX_GROUPS}\n\n"
+                         f"⏳  <b>Runtime Today</b>\n"
+                         f"     [{bar}]  {hours_used:.1f}h / 8h\n\n"
+                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰",
                          back_keyboard())
 
             elif data == 'setmessage':
                 self.pending_message[uid] = True
                 edit_msg(uid, mid,
-                         "💬 <b>Set Your Ad Message</b>\n\n"
-                         "✍️ Send your promotional message now:\n\n"
-                         "<i>Type /cancel to go back</i>",
+                         "✍️ <b>Set Your Ad Message</b>\n"
+                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+                         "Send your promotional message now.\n"
+                         "It will be sent to all your groups.\n\n"
+                         "💡 <i>Tip: Keep it short and clear for best results</i>\n\n"
+                         "Type /cancel to go back\n"
+                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰",
                          make_keyboard([[{"text": "❌ Cancel",
                                           "callback_data": "dashboard"}]]))
 
@@ -653,11 +785,13 @@ class UzeronFreeBot:
                          dashboard_text(self.db.get_user(uid), runtime),
                          dashboard_keyboard())
                 send_msg(uid,
-                         "🚀 <b>Free Campaign Started!</b>\n\n"
-                         f"📊 Limit: {FREE_MAX_GROUPS} groups\n"
-                         f"⏱️ Message delay: {FREE_MSG_DELAY}s\n"
-                         f"🔄 Cycle delay: {FREE_CYCLE_DELAY//60}m\n"
-                         f"⏳ Daily limit: 8 hours\n\n"
+                         "🚀 <b>Campaign Started!</b>\n"
+                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+                         f"🔢  Groups:       <b>{FREE_MAX_GROUPS} max</b>\n"
+                         f"⏱   Msg Delay:  <b>{FREE_MSG_DELAY}s</b>\n"
+                         f"🔄  Cycle:          <b>{FREE_CYCLE_DELAY//60} min</b>\n"
+                         f"⏳  Daily Limit: <b>8 hours</b>\n\n"
+                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n"
                          "💎 <i>Upgrade for unlimited access!</i>")
 
             elif data == 'stopcampaign':
@@ -935,11 +1069,12 @@ class UzeronFreeBot:
                 return
 
             send_msg(uid,
-                     f"📊 <b>Free Campaign Ready!</b>\n\n"
-                     f"✅ Found <b>{len(groups)}</b> groups "
-                     f"(max {FREE_MAX_GROUPS})\n"
-                     f"⏱️ Delay: <b>{FREE_MSG_DELAY}s</b>\n"
-                     f"🔄 Cycle: <b>{FREE_CYCLE_DELAY//60}m</b>\n\n"
+                     f"📊 <b>Campaign Ready!</b>\n"
+                     f"▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+                     f"✅  Groups found:  <b>{len(groups)}</b> / {FREE_MAX_GROUPS}\n"
+                     f"⏱   Msg Delay:    <b>{FREE_MSG_DELAY}s</b>\n"
+                     f"🔄  Cycle Delay:  <b>{FREE_CYCLE_DELAY//60}m</b>\n\n"
+                     f"▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n"
                      f"🚀 Sending started...")
 
             round_num      = 0
@@ -972,8 +1107,9 @@ class UzeronFreeBot:
 
                 for group in groups:
                     if not self.db.get_user(uid)[6]: break
-                    elapsed = (datetime.now() - campaign_start).total_seconds()
-                    if runtime + elapsed >= FREE_MAX_RUNTIME:
+                    # recalculate elapsed on every iteration so runtime check is accurate
+                    elapsed_now = (datetime.now() - campaign_start).total_seconds()
+                    if runtime + elapsed_now >= FREE_MAX_RUNTIME:
                         break
                     try:
                         await user_client.send_message(group.entity, message)
@@ -981,23 +1117,30 @@ class UzeronFreeBot:
                         self.logger.send_log(uid, f"✓ [{phone}] → {group.name}")
                         await asyncio.sleep(FREE_MSG_DELAY)
                     except FloodWaitError as e:
-                        send_msg(uid, f"⚠️ <b>FloodWait!</b> Pausing {e.seconds}s...")
+                        send_msg(uid, f"⚠️ <b>FloodWait!</b> Pausing for {e.seconds}s...")
                         await asyncio.sleep(e.seconds)
                     except Exception as e:
                         failed += 1
+                        print(f"[{uid}] Send error to {group.name}: {e}")
                         await asyncio.sleep(10)
 
+                elapsed_this_session = (datetime.now() - campaign_start).total_seconds()
                 hours_left = max(0, 8 - (runtime + elapsed_this_session) / 3600)
+                bar_f  = int(((8 - hours_left) / 8) * 10)
+                bar    = "█" * bar_f + "░" * (10 - bar_f)
                 send_msg(uid,
-                         f"📊 <b>Round {round_num} Complete!</b>\n\n"
-                         f"✅ Sent: <b>{sent}</b>\n"
-                         f"❌ Failed: <b>{failed}</b>\n"
-                         f"⏳ Runtime left today: <b>{hours_left:.1f}h</b>\n\n"
-                         f"⏳ Next round in <b>{FREE_CYCLE_DELAY//60} minutes...</b>\n\n"
+                         f"✅ <b>Round {round_num} Complete!</b>\n"
+                         f"▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+                         f"📤  Sent:     <b>{sent}</b>\n"
+                         f"❌  Failed:  <b>{failed}</b>\n\n"
+                         f"⏳  Runtime Left\n"
+                         f"     [{bar}]  {hours_left:.1f}h\n\n"
+                         f"🔄  Next round in <b>{FREE_CYCLE_DELAY//60} min</b>\n"
+                         f"▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n"
                          f"💎 <i>Upgrade for unlimited runtime!</i>",
                          make_keyboard([
-                             [{"text": "🛑 Stop",    "callback_data": "stopcampaign"}],
-                             [{"text": "💎 Upgrade", "callback_data": "upgrade"}]
+                             [{"text": "🛑 Stop Campaign", "callback_data": "stopcampaign"}],
+                             [{"text": "💎 Go Premium",    "callback_data": "upgrade"}]
                          ]))
                 await asyncio.sleep(FREE_CYCLE_DELAY)
 
