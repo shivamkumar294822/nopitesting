@@ -1,1188 +1,835 @@
 # -*- coding: utf-8 -*-
+"""
+Uzeron AdsBot — Free Tier  (clean rewrite)
+"""
 
-import os
-import sys
-import asyncio
-import psycopg2
-from psycopg2 import extras
-import json
-import pytz
-from datetime import datetime, timedelta
+import os, sys, asyncio, psycopg2, json, pytz, requests
+from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
-import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-DATABASE_URL = os.getenv('DATABASE_URL')
-BOT_API_ID   = int(os.getenv('API_ID'))
-BOT_API_HASH = os.getenv('API_HASH')
+# ── ENV ────────────────────────────────────────────────────────────────────────
+DATABASE_URL     = os.getenv('DATABASE_URL')
+BOT_API_ID       = int(os.getenv('API_ID'))
+BOT_API_HASH     = os.getenv('API_HASH')
 FREE_BOT_TOKEN   = os.getenv('FREE_BOT_TOKEN')
 LOGGER_BOT_TOKEN = os.getenv('LOGGER_BOT_TOKEN')
-ADMINS = [int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip()]
+ADMINS           = [int(x) for x in os.getenv('ADMIN_IDS','').split(',') if x.strip()]
 
-SUPPORT_LINK      = "https://t.me/Uzeron_Ads_support"
-CONTACT_USERNAME  = "@Pandaysubscription"
-PREMIUM_BOT       = "@Uzeron_AdsBot"
-UPDATES_CHANNEL   = "https://t.me/Uzeron_Ads"
-HOW_TO_USE        = "https://t.me/Uzeron_Ads"
+# ── LINKS ──────────────────────────────────────────────────────────────────────
+CONTACT_USERNAME = "@Pandaysubscription"
+PREMIUM_BOT      = "@Uzeron_AdsBot"
+SUPPORT_LINK     = "https://t.me/Uzeron_Ads_support"
 
-# Force-join: users must be a member of this channel to use the bot
-# Set FORCE_JOIN_CHANNEL in env (e.g. "@Uzeron_Ads") or leave blank to disable
-FORCE_JOIN_CHANNEL = os.getenv('FORCE_JOIN_CHANNEL', '@Uzeron_Ads')
+FORCE_JOIN_CHANNEL = "@UzeronAdsBot"          # bot must be admin here
+CHANNEL_LINK       = "https://t.me/Uzeron_AdsBot"
+CHANNEL_NAME       = "Uzeron"
+COMMUNITY_LINK     = "https://t.me/UzeronCommunity"
+COMMUNITY_NAME     = "Uzeron Community"
+HOW_TO_USE_LINK    = "https://t.me/Uzeron_Ads"
+HOW_TO_USE_NAME    = "@Uzeron_Ads"
 
 IST = pytz.timezone('Asia/Kolkata')
 
-# ============================================
-# FREE TIER LIMITS
-# ============================================
+# ── FREE TIER CONSTANTS ────────────────────────────────────────────────────────
 FREE_MAX_GROUPS          = 100
 FREE_CYCLE_DELAY         = 600
 FREE_MSG_DELAY           = 60
 FREE_MAX_RUNTIME         = 8 * 3600
 FREE_BRANDING_LASTNAME   = "• via @Uzeron_AdsBot"
-FREE_BRANDING_BIO        = "🚀 Free Automated Ads via @Uzeron_AdsBot | Get Premium: @Pandaysubscription"
+FREE_BRANDING_BIO        = "🚀 Free Ads via @Uzeron_AdsBot | Upgrade: @Pandaysubscription"
 FREE_WARNINGS_BEFORE_BAN = 3
 
-# ============================================
-# KEYBOARD HELPERS
-# ============================================
-def make_keyboard(buttons):
-    return {"inline_keyboard": buttons}
-
-def force_join_keyboard():
-    return make_keyboard([
-        [{"text": "📢 Join Channel — Required", "url": UPDATES_CHANNEL}],
-        [{"text": "✅ I've Joined — Continue",  "callback_data": "check_join"}]
-    ])
-
-def dashboard_keyboard():
-    return make_keyboard([
-        [{"text": "👤 My Account",               "callback_data": "account"},
-         {"text": "📊 Campaign Status",           "callback_data": "status"}],
-        [{"text": "✍️ Set Ad Message",            "callback_data": "setmessage"},
-         {"text": "⏱ 60s  |  🔄 10m Cycle",     "callback_data": "delay_info"}],
-        [{"text": "🚀 Start Campaign",            "callback_data": "startcampaign"},
-         {"text": "🛑 Stop Campaign",             "callback_data": "stopcampaign"}],
-        [{"text": "🔑 Login Account",             "callback_data": "login"},
-         {"text": "💎 Go Premium",                "callback_data": "upgrade"}],
-        [{"text": "📢 Updates",                   "url": UPDATES_CHANNEL},
-         {"text": "📖 How To Use",               "url": HOW_TO_USE}],
-        [{"text": "🚪 Logout",                    "callback_data": "logout"}]
-    ])
-
-def back_keyboard():
-    return make_keyboard([[{"text": "🏠 Back to Dashboard", "callback_data": "dashboard"}]])
-
-def upgrade_keyboard():
-    return make_keyboard([
-        [{"text": "💎 Upgrade Now — " + CONTACT_USERNAME,
-          "url": "https://t.me/Pandaysubscription"}],
-        [{"text": "📢 Support",  "url": SUPPORT_LINK},
-         {"text": "📖 How To Use", "url": HOW_TO_USE}],
-        [{"text": "🔙 Back", "callback_data": "dashboard"}]
-    ])
-
-# ── FORCE JOIN CHECK via Bot API ─────────────────────────────────────────────
-def check_user_joined(user_id: int) -> bool:
-    """Returns True if user is a member of FORCE_JOIN_CHANNEL, False otherwise."""
-    if not FORCE_JOIN_CHANNEL:
-        return True
+# ── BOT API HELPERS (sync, for use outside async context) ─────────────────────
+def _tg(method: str, **kwargs) -> dict:
+    url = f"https://api.telegram.org/bot{FREE_BOT_TOKEN}/{method}"
     try:
-        channel = FORCE_JOIN_CHANNEL.lstrip('@')
-        url  = f"https://api.telegram.org/bot{FREE_BOT_TOKEN}/getChatMember"
-        resp = requests.get(url, params={"chat_id": f"@{channel}", "user_id": user_id},
-                            timeout=8)
-        data = resp.json()
-        status = data.get("result", {}).get("status", "")
-        return status in ("member", "administrator", "creator")
+        data = {k: json.dumps(v) if isinstance(v,(dict,list)) else v
+                for k,v in kwargs.items()}
+        return requests.post(url, data=data, timeout=10).json()
     except Exception as e:
-        print(f"Force-join check error: {e}")
-        return True   # fail-open so a network blip doesn't lock everyone out
-# ─────────────────────────────────────────────────────────────────────────────
+        print(f"[tg:{method}] {e}")
+        return {}
 
-# ============================================
-# MESSAGE TEMPLATES
-# ============================================
-def force_join_text():
-    return (
-        "👋 <b>Welcome to Uzeron AdsBot!</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📢 <b>One quick step before we begin:</b>\n\n"
-        "You must join our official channel to use this bot.\n"
-        "It's where we post updates, tips & announcements.\n\n"
-        "1️⃣  Tap <b>Join Channel</b> below\n"
-        "2️⃣  Come back and tap <b>I've Joined</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━"
-    )
+def send_msg(chat_id, text, keyboard=None):
+    kw = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if keyboard: kw["reply_markup"] = keyboard
+    _tg("sendMessage", **kw)
 
-def welcome_text():
-    return (
-        "🆓 <b>UZERON ADSBOT — Free Plan</b>\n\n"
-        "╔══════════════════════╗\n"
-        "║  ✦ 100 Groups Max\n"
-        "║  ✦ 60s Message Delay\n"
-        "║  ✦ 10 min Cycle Delay\n"
-        "║  ✦ 8 Hours Daily Runtime\n"
-        "║  ✦ Account Branding Required\n"
-        "╚══════════════════════╝\n\n"
-        "💎 <b>Upgrade to Premium for:</b>\n"
-        "  • Unlimited groups & runtime\n"
-        "  • Custom delays\n"
-        "  • No branding\n"
-        "  • Message rotation\n"
-        "  • Auto schedule\n\n"
-        "Use /start to open your dashboard"
-    )
+def edit_msg(chat_id, msg_id, text, keyboard=None):
+    kw = {"chat_id": chat_id, "message_id": msg_id,
+          "text": text, "parse_mode": "HTML"}
+    if keyboard: kw["reply_markup"] = keyboard
+    _tg("editMessageText", **kw)
 
-def dashboard_text(user, runtime_used):
-    phone      = f"<code>{user[1]}</code>" if user and user[1] else "❌ Not connected"
-    msg_status = "✅  Set & Ready"  if user and user[5] else "❌  Not set"
-    campaign   = "🟢  Running"     if user and user[6] else "🔴  Stopped"
-    hours_used = runtime_used / 3600
-    hours_left = max(0, 8 - hours_used)
-    bar_filled = int((hours_used / 8) * 10)
-    bar        = "█" * bar_filled + "░" * (10 - bar_filled)
+def check_joined_sync(uid: int) -> bool:
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{FREE_BOT_TOKEN}/getChatMember",
+            params={"chat_id": FORCE_JOIN_CHANNEL, "user_id": uid}, timeout=6
+        ).json()
+        return r.get("result",{}).get("status","") in ("member","administrator","creator","restricted")
+    except Exception as e:
+        print(f"[check_joined] {e}")
+        return True  # fail-open
+
+# ── KEYBOARDS (return JSON string, ready to send) ─────────────────────────────
+def kb(rows): return json.dumps({"inline_keyboard": rows})
+
+def kb_force_join(): return kb([
+    [{"text": f"📢 Join {CHANNEL_NAME}",   "url": CHANNEL_LINK}],
+    [{"text": f"👥 Join {COMMUNITY_NAME}", "url": COMMUNITY_LINK}],
+    [{"text": "✅  I've Joined — Continue","callback_data": "check_join"}],
+])
+
+def kb_dashboard(): return kb([
+    [{"text":"👤 My Account",      "callback_data":"account"},
+     {"text":"📊 Status",         "callback_data":"status"}],
+    [{"text":"✍️ Set Ad Message",  "callback_data":"setmessage"},
+     {"text":"⏱ 60s │ 🔄 10m",   "callback_data":"delay_info"}],
+    [{"text":"🚀 Start Campaign",  "callback_data":"startcampaign"},
+     {"text":"🛑 Stop Campaign",   "callback_data":"stopcampaign"}],
+    [{"text":"🔑 Login",           "callback_data":"login"},
+     {"text":"💎 Go Premium",      "callback_data":"upgrade"}],
+    [{"text":f"📢 {CHANNEL_NAME}","url":CHANNEL_LINK},
+     {"text":"📖 How To Use",     "url":HOW_TO_USE_LINK}],
+    [{"text":"🚪 Logout",          "callback_data":"logout"}],
+])
+
+def kb_back(): return kb([[{"text":"🏠 Back to Dashboard","callback_data":"dashboard"}]])
+
+def kb_upgrade(): return kb([
+    [{"text":f"💎 Upgrade — {CONTACT_USERNAME}","url":"https://t.me/Pandaysubscription"}],
+    [{"text":"📢 Support","url":SUPPORT_LINK},
+     {"text":"📖 How To Use","url":HOW_TO_USE_LINK}],
+    [{"text":"🔙 Back","callback_data":"dashboard"}],
+])
+
+def kb_otp(digits: str): return kb([
+    [{"text":f"🔢  {digits or '_ _ _ _ _'}","callback_data":"otp_noop"}],
+    [{"text":"1","callback_data":"otp_1"},{"text":"2","callback_data":"otp_2"},{"text":"3","callback_data":"otp_3"}],
+    [{"text":"4","callback_data":"otp_4"},{"text":"5","callback_data":"otp_5"},{"text":"6","callback_data":"otp_6"}],
+    [{"text":"7","callback_data":"otp_7"},{"text":"8","callback_data":"otp_8"},{"text":"9","callback_data":"otp_9"}],
+    [{"text":"⌫ Del","callback_data":"otp_back"},
+     {"text":"0","callback_data":"otp_0"},
+     {"text":"✅ Submit","callback_data":"otp_submit"}],
+    [{"text":"❌ Cancel","callback_data":"cancel_login"}],
+])
+
+def kb_cancel(): return kb([[{"text":"❌ Cancel","callback_data":"cancel_login"}]])
+
+# ── MESSAGE TEMPLATES ──────────────────────────────────────────────────────────
+def txt_force_join(): return (
+    "👋 <b>Welcome to Uzeron AdsBot!</b>\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "📢 <b>Join our channels to continue:</b>\n\n"
+    f"  • <b>{CHANNEL_NAME}</b> — updates & announcements\n"
+    f"  • <b>{COMMUNITY_NAME}</b> — tips & community\n\n"
+    "1️⃣  Tap the <b>Join</b> buttons below\n"
+    "2️⃣  Come back and tap <b>I've Joined</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━"
+)
+
+def txt_dashboard(user, rt):
+    phone  = f"<code>{user[1]}</code>" if user and user[1] else "❌  Not connected"
+    msg_st = "✅  Set & Ready" if user and user[5] else "❌  Not set"
+    camp   = "🟢  Running"    if user and user[6] else "🔴  Stopped"
+    h_used = rt / 3600
+    h_left = max(0.0, 8.0 - h_used)
+    filled = min(10, int(h_used / 8 * 10))
+    bar    = "█"*filled + "░"*(10-filled)
     return (
         "⚡ <b>UZERON ADSBOT  •  Free Plan</b>\n"
         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
-        f"📱  <b>Account</b>      {phone}\n"
-        f"✉️   <b>Ad Message</b>  {msg_status}\n"
-        f"⏱   <b>Delay</b>       60s  │  🔄 Cycle: 10m\n"
-        f"📡  <b>Campaign</b>    {campaign}\n\n"
+        f"📱  <b>Account</b>     {phone}\n"
+        f"✉️   <b>Ad Message</b>  {msg_st}\n"
+        f"⏱   <b>Delay</b>      60s  │  🔄 10m cycle\n"
+        f"📡  <b>Campaign</b>   {camp}\n\n"
         f"⏳  <b>Runtime Today</b>\n"
-        f"     [{bar}]  {hours_used:.1f}h / 8h\n"
-        f"     🕐 Time Left: <b>{hours_left:.1f}h</b>\n\n"
+        f"     [{bar}]  {h_used:.1f}h / 8h\n"
+        f"     🕐 Time Left: <b>{h_left:.1f}h</b>\n\n"
         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n"
-        "⚠️  <i>Free Plan: max 100 groups, 8hr/day</i>"
+        "⚠️  <i>Free Plan: 100 groups max · 8hr/day</i>"
     )
 
-def upgrade_text():
-    return (
-        "💎 <b>UPGRADE TO PREMIUM</b>\n\n"
-        "Unlock the full power of Uzeron!\n\n"
-        "╔══════════════════════╗\n"
-        "║  🚀  Unlimited Groups\n"
-        "║  ⏱   Custom Delays (30 / 45 / 60s)\n"
-        "║  🔀  Message Rotation (3 msgs)\n"
-        "║  ⏰  Auto Schedule (IST)\n"
-        "║  🏷   No Account Branding\n"
-        "║  📊  Campaign Analytics\n"
-        "║  🛡   24 / 7 Priority Support\n"
-        "╚══════════════════════╝\n\n"
-        "📦 <b>Plans Available:</b>\n"
-        "  🥉  Starter  —  7 Days\n"
-        "  🥈  Growth   —  15 Days\n"
-        "  🥇  Pro      —  30 Days\n\n"
-        f"👤  Contact: <b>{CONTACT_USERNAME}</b>\n"
-        f"🤖  Premium Bot: <b>{PREMIUM_BOT}</b>"
-    )
-def otp_keypad_keyboard(digits_so_far: str):
-    """
-    Renders a numeric keypad.
-    Top row shows the OTP entered so far (or a placeholder).
-    Rows: [1][2][3] / [4][5][6] / [7][8][9] / [⌫][0][✅ Submit]
-    Cancel button at the bottom.
-    """
-    display = digits_so_far if digits_so_far else "_ _ _ _ _"
-    return make_keyboard([
-        # Display row — non-interactive, shows entered digits
-        [{"text": f"🔢  {display}", "callback_data": "otp_noop"}],
-        # Digit rows
-        [{"text": "1", "callback_data": "otp_1"},
-         {"text": "2", "callback_data": "otp_2"},
-         {"text": "3", "callback_data": "otp_3"}],
-        [{"text": "4", "callback_data": "otp_4"},
-         {"text": "5", "callback_data": "otp_5"},
-         {"text": "6", "callback_data": "otp_6"}],
-        [{"text": "7", "callback_data": "otp_7"},
-         {"text": "8", "callback_data": "otp_8"},
-         {"text": "9", "callback_data": "otp_9"}],
-        [{"text": "⌫ Back",      "callback_data": "otp_back"},
-         {"text": "0",           "callback_data": "otp_0"},
-         {"text": "✅ Submit",   "callback_data": "otp_submit"}],
-        [{"text": "❌ Cancel Login", "callback_data": "cancel_login"}]
-    ])
-# ─────────────────────────────────────────────────────────────────────────────
+def txt_upgrade(): return (
+    "💎 <b>UPGRADE TO PREMIUM</b>\n\n"
+    "Unlock the full power of Uzeron!\n\n"
+    "╔══════════════════════╗\n"
+    "║  🚀  Unlimited Groups\n"
+    "║  ⏱   Custom Delays (30/45/60s)\n"
+    "║  🔀  Message Rotation (3 msgs)\n"
+    "║  ⏰  Auto Schedule (IST)\n"
+    "║  🏷   No Account Branding\n"
+    "║  📊  Campaign Analytics\n"
+    "║  🛡   24/7 Priority Support\n"
+    "╚══════════════════════╝\n\n"
+    "📦 <b>Plans:</b>\n"
+    "  🥉  Starter — 7 Days\n"
+    "  🥈  Growth  — 15 Days\n"
+    "  🥇  Pro     — 30 Days\n\n"
+    f"👤  Contact: <b>{CONTACT_USERNAME}</b>\n"
+    f"🤖  Premium Bot: <b>{PREMIUM_BOT}</b>"
+)
 
-def bot_api(method, data=None):
-    url = f"https://api.telegram.org/bot{FREE_BOT_TOKEN}/{method}"
-    try:
-        processed = {k: json.dumps(v) if isinstance(v, dict) else v
-                     for k, v in (data or {}).items()}
-        requests.post(url, data=processed, timeout=10)
-    except Exception as e:
-        print(f"Bot API error [{method}]: {e}")
-
-def send_msg(chat_id, text, keyboard=None):
-    data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    if keyboard:
-        data["reply_markup"] = json.dumps(keyboard)
-    bot_api("sendMessage", data)
-
-def edit_msg(chat_id, msg_id, text, keyboard=None):
-    data = {"chat_id": chat_id, "message_id": msg_id,
-            "text": text, "parse_mode": "HTML"}
-    if keyboard:
-        data["reply_markup"] = json.dumps(keyboard)
-    bot_api("editMessageText", data)
-
-# ============================================
-# MESSAGE TEMPLATES
-# ============================================
-def welcome_text():
-    return (
-        "🆓 <b>UZERON ADSBOT — Free Plan</b>\n\n"
-        "╔══════════════════════╗\n"
-        "║ ✦ 100 Groups Max\n"
-        "║ ✦ 60s Message Delay\n"
-        "║ ✦ 10min Cycle Delay\n"
-        "║ ✦ 8 Hours Daily Runtime\n"
-        "║ ✦ Account Branding Required\n"
-        "╚══════════════════════╝\n\n"
-        "💎 <b>Upgrade to Premium for:</b>\n"
-        "• Unlimited groups & runtime\n"
-        "• Custom delays\n"
-        "• No branding\n"
-        "• Message rotation\n"
-        "• Auto schedule\n\n"
-        "Use /start to open your dashboard"
-    )
-
-def dashboard_text(user, runtime_used):
-    phone     = user[1] if user and user[1] else "Not connected"
-    msg_status = "✅ Set"     if user and user[5] else "❌ Not set"
-    campaign   = "🟢 Live"   if user and user[6] else "🔴 Stopped"
-    hours_used = runtime_used / 3600
-    hours_left = max(0, 8 - hours_used)
-    return (
-        "⚡ <b>UZERON ADSBOT — Free Dashboard</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"📱 <b>Account:</b> <code>{phone}</code>\n"
-        f"💬 <b>Ad Message:</b> {msg_status}\n"
-        f"⏱️ <b>Delay:</b> 60s | <b>Cycle:</b> 10m\n"
-        f"⏳ <b>Runtime Today:</b> {hours_used:.1f}h / 8h\n"
-        f"🕐 <b>Time Left:</b> {hours_left:.1f}h\n"
-        f"📡 <b>Campaign:</b> {campaign}\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "⚠️ <i>Free plan: 100 groups, 8hr/day limit</i>"
-    )
-
-def upgrade_text():
-    return (
-        "💎 <b>UPGRADE TO PREMIUM</b>\n\n"
-        "Unlock the full power of Uzeron!\n\n"
-        "╔══════════════════════╗\n"
-        "║ 🚀 Unlimited Groups\n"
-        "║ ⏱️ Custom Delays (30/45/60s)\n"
-        "║ 🔀 Message Rotation (3 msgs)\n"
-        "║ ⏰ Auto Schedule (IST)\n"
-        "║ 🏷️ No Account Branding\n"
-        "║ 📊 Campaign Analytics\n"
-        "║ 24/7 Priority Support\n"
-        "╚══════════════════════╝\n\n"
-        "📦 <b>Plans:</b>\n"
-        "🥉 Starter — 7 Days\n"
-        "🥈 Growth — 15 Days\n"
-        "🥇 Pro — 30 Days\n\n"
-        f"👤 Contact: <b>{CONTACT_USERNAME}</b>\n"
-        f"🤖 Premium Bot: <b>{PREMIUM_BOT}</b>"
-    )
-
-# ============================================
-# DATABASE
-# ============================================
+# ── DATABASE ───────────────────────────────────────────────────────────────────
 class Database:
-    def __init__(self):
-        self.init_db()
-
     def get_conn(self):
         return psycopg2.connect(DATABASE_URL, sslmode='require')
 
     def init_db(self):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS free_users (
-            user_id        BIGINT PRIMARY KEY,
-            username       TEXT,
-            phone          TEXT,
-            api_id         INTEGER,
-            api_hash       TEXT,
-            session_string TEXT,
-            promo_message  TEXT,
-            is_active      INTEGER DEFAULT 0,
-            runtime_today  INTEGER DEFAULT 0,
-            last_reset     TEXT,
-            warning_count  INTEGER DEFAULT 0,
-            is_banned      INTEGER DEFAULT 0,
-            branding_set   INTEGER DEFAULT 0,
-            created_at     TEXT
-        )''')
-        conn.commit()
-        conn.close()
+        with self.get_conn() as conn:
+            conn.cursor().execute('''
+                CREATE TABLE IF NOT EXISTS free_users (
+                    user_id BIGINT PRIMARY KEY, username TEXT,
+                    phone TEXT, api_id INTEGER, api_hash TEXT, session_string TEXT,
+                    promo_message TEXT, is_active INTEGER DEFAULT 0,
+                    runtime_today INTEGER DEFAULT 0, last_reset TEXT,
+                    warning_count INTEGER DEFAULT 0, is_banned INTEGER DEFAULT 0,
+                    branding_set INTEGER DEFAULT 0, created_at TEXT
+                )''')
+            conn.commit()
 
-    def get_user(self, user_id):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''SELECT user_id, phone, api_id, api_hash, session_string,
-                            promo_message, is_active, runtime_today, last_reset,
-                            warning_count, is_banned, branding_set
-                     FROM free_users WHERE user_id=%s''', (user_id,))
-        r = c.fetchone()
-        conn.close()
-        return r
+    # indices: 0=uid 1=phone 2=api_id 3=api_hash 4=session 5=promo
+    #          6=is_active 7=runtime 8=last_reset 9=warnings 10=banned 11=branding
 
-    def register_user(self, user_id, username):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT user_id FROM free_users WHERE user_id=%s', (user_id,))
-        if not c.fetchone():
-            c.execute('''INSERT INTO free_users
-                             (user_id, username, created_at)
-                         VALUES (%s, %s, %s)''',
-                      (user_id, username,
-                       datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-        conn.commit()
-        conn.close()
+    def get_user(self, uid):
+        with self.get_conn() as conn:
+            c = conn.cursor()
+            c.execute('''SELECT user_id,phone,api_id,api_hash,session_string,
+                                promo_message,is_active,runtime_today,last_reset,
+                                warning_count,is_banned,branding_set
+                         FROM free_users WHERE user_id=%s''',(uid,))
+            return c.fetchone()
 
-    def is_banned(self, user_id):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT is_banned FROM free_users WHERE user_id=%s', (user_id,))
-        r = c.fetchone()
-        conn.close()
-        return r and r[0] == 1
+    def register_user(self, uid, username):
+        with self.get_conn() as conn:
+            c = conn.cursor()
+            c.execute('SELECT 1 FROM free_users WHERE user_id=%s',(uid,))
+            if not c.fetchone():
+                c.execute('INSERT INTO free_users(user_id,username,created_at) VALUES(%s,%s,%s)',
+                          (uid, username, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            conn.commit()
 
-    def save_session(self, user_id, phone, api_id, api_hash, session_string):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''UPDATE free_users SET phone=%s, api_id=%s,
-                     api_hash=%s, session_string=%s WHERE user_id=%s''',
-                  (phone, api_id, api_hash, session_string, user_id))
-        conn.commit()
-        conn.close()
+    def is_banned(self, uid):
+        with self.get_conn() as conn:
+            c = conn.cursor()
+            c.execute('SELECT is_banned FROM free_users WHERE user_id=%s',(uid,))
+            r = c.fetchone(); return bool(r and r[0])
 
-    def set_promo_message(self, user_id, message):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('UPDATE free_users SET promo_message=%s WHERE user_id=%s',
-                  (message, user_id))
-        conn.commit()
-        conn.close()
+    def save_session(self, uid, phone, session):
+        with self.get_conn() as conn:
+            c = conn.cursor()
+            c.execute('UPDATE free_users SET phone=%s,api_id=%s,api_hash=%s,session_string=%s WHERE user_id=%s',
+                      (phone, BOT_API_ID, BOT_API_HASH, session, uid))
+            conn.commit()
 
-    def set_campaign_status(self, user_id, status):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('UPDATE free_users SET is_active=%s WHERE user_id=%s',
-                  (status, user_id))
-        conn.commit()
-        conn.close()
+    def set_promo(self, uid, msg):
+        with self.get_conn() as conn:
+            c = conn.cursor()
+            c.execute('UPDATE free_users SET promo_message=%s WHERE user_id=%s',(msg,uid))
+            conn.commit()
 
-    def get_runtime_today(self, user_id):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT runtime_today, last_reset FROM free_users WHERE user_id=%s',
-                  (user_id,))
-        r = c.fetchone()
-        conn.close()
-        if not r:
-            return 0
-        runtime, last_reset = r
+    def set_active(self, uid, v):
+        with self.get_conn() as conn:
+            c = conn.cursor()
+            c.execute('UPDATE free_users SET is_active=%s WHERE user_id=%s',(v,uid))
+            conn.commit()
+
+    def get_runtime(self, uid):
+        with self.get_conn() as conn:
+            c = conn.cursor()
+            c.execute('SELECT runtime_today,last_reset FROM free_users WHERE user_id=%s',(uid,))
+            row = c.fetchone()
+        if not row: return 0
+        rt, lr = row
         today = datetime.now(IST).strftime('%Y-%m-%d')
-        if last_reset != today:
-            self.reset_runtime(user_id, today)
+        if lr != today:
+            with self.get_conn() as conn:
+                c = conn.cursor()
+                c.execute('UPDATE free_users SET runtime_today=0,last_reset=%s WHERE user_id=%s',(today,uid))
+                conn.commit()
             return 0
-        return runtime or 0
+        return int(rt or 0)
 
-    def reset_runtime(self, user_id, today):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('UPDATE free_users SET runtime_today=0, last_reset=%s WHERE user_id=%s',
-                  (today, user_id))
-        conn.commit()
-        conn.close()
-
-    def add_runtime(self, user_id, seconds):
-        conn = self.get_conn()
-        c = conn.cursor()
+    def add_runtime(self, uid, secs):
         today = datetime.now(IST).strftime('%Y-%m-%d')
-        c.execute('''UPDATE free_users SET
-                         runtime_today = COALESCE(runtime_today, 0) + %s,
-                         last_reset = %s
-                     WHERE user_id=%s''', (seconds, today, user_id))
-        conn.commit()
-        conn.close()
+        with self.get_conn() as conn:
+            c = conn.cursor()
+            c.execute('UPDATE free_users SET runtime_today=COALESCE(runtime_today,0)+%s,last_reset=%s WHERE user_id=%s',
+                      (secs, today, uid))
+            conn.commit()
 
-    def set_branding(self, user_id, status):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('UPDATE free_users SET branding_set=%s WHERE user_id=%s',
-                  (status, user_id))
-        conn.commit()
-        conn.close()
+    def set_branding(self, uid, v):
+        with self.get_conn() as conn:
+            c = conn.cursor()
+            c.execute('UPDATE free_users SET branding_set=%s WHERE user_id=%s',(v,uid))
+            conn.commit()
 
-    def add_warning(self, user_id):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''UPDATE free_users SET
-                         warning_count = COALESCE(warning_count, 0) + 1
-                     WHERE user_id=%s''', (user_id,))
-        c.execute('SELECT warning_count FROM free_users WHERE user_id=%s', (user_id,))
-        count = c.fetchone()[0]
-        if count >= FREE_WARNINGS_BEFORE_BAN:
-            c.execute('UPDATE free_users SET is_banned=1 WHERE user_id=%s', (user_id,))
-        conn.commit()
-        conn.close()
-        return count
+    def add_warning(self, uid):
+        with self.get_conn() as conn:
+            c = conn.cursor()
+            c.execute('UPDATE free_users SET warning_count=COALESCE(warning_count,0)+1 WHERE user_id=%s',(uid,))
+            c.execute('SELECT warning_count FROM free_users WHERE user_id=%s',(uid,))
+            n = c.fetchone()[0]
+            if n >= FREE_WARNINGS_BEFORE_BAN:
+                c.execute('UPDATE free_users SET is_banned=1 WHERE user_id=%s',(uid,))
+            conn.commit()
+        return n
 
-    def ban_user(self, user_id):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('UPDATE free_users SET is_banned=1 WHERE user_id=%s', (user_id,))
-        conn.commit()
-        conn.close()
+    def ban_user(self, uid):
+        with self.get_conn() as conn:
+            c = conn.cursor()
+            c.execute('UPDATE free_users SET is_banned=1 WHERE user_id=%s',(uid,))
+            conn.commit()
 
-    def logout_user(self, user_id):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''UPDATE free_users SET phone=NULL, api_id=NULL,
-                     api_hash=NULL, session_string=NULL,
-                     is_active=0, branding_set=0 WHERE user_id=%s''', (user_id,))
-        conn.commit()
-        conn.close()
+    def logout_user(self, uid):
+        with self.get_conn() as conn:
+            c = conn.cursor()
+            c.execute('UPDATE free_users SET phone=NULL,api_id=NULL,api_hash=NULL,'
+                      'session_string=NULL,is_active=0,branding_set=0 WHERE user_id=%s',(uid,))
+            conn.commit()
 
-    def get_all_users(self):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT user_id, username FROM free_users WHERE is_banned=0')
-        r = c.fetchall()
-        conn.close()
-        return r
+    def all_users(self):
+        with self.get_conn() as conn:
+            c = conn.cursor()
+            c.execute('SELECT user_id,username FROM free_users WHERE is_banned=0')
+            return c.fetchall()
 
-# ============================================
-# LOGGER
-# ============================================
+# ── LOGGER ─────────────────────────────────────────────────────────────────────
 class Logger:
-    def __init__(self, token):
-        self.url = f"https://api.telegram.org/bot{token}/sendMessage"
+    _url = f"https://api.telegram.org/bot{LOGGER_BOT_TOKEN}/sendMessage"
+    def log(self, uid, text):
+        try: requests.post(self._url, data={"chat_id":uid,"text":text,"parse_mode":"HTML"}, timeout=6)
+        except Exception as e: print(f"[log] {e}")
 
-    def send_log(self, chat_id, message):
-        try:
-            requests.post(self.url,
-                          data={'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'},
-                          timeout=10)
-        except Exception as e:
-            print(f"Logger error: {e}")
-
-# ============================================
-# FREE BOT
-# ============================================
+# ── BOT ────────────────────────────────────────────────────────────────────────
 class UzeronFreeBot:
     def __init__(self):
-        bot_session_str = os.getenv('BOT_SESSION_STRING', '')
-        self.bot = TelegramClient(
-            StringSession(bot_session_str), BOT_API_ID, BOT_API_HASH)
-        self.db      = Database()
-        self.logger  = Logger(LOGGER_BOT_TOKEN)
-        self.tasks   = {}
-        self.login_states   = {}   # uid → state dict
-        self.pending_message = {}
-        self.campaign_start_times = {}
+        self.bot   = TelegramClient(StringSession(os.getenv('BOT_SESSION_STRING','')), BOT_API_ID, BOT_API_HASH)
+        self.db    = Database()
+        self.log   = Logger()
+        self.tasks       = {}   # uid → Task
+        self.start_times = {}   # uid → datetime
+        self.login_st    = {}   # uid → state dict
+        self.pending_msg = set()
 
-    async def start(self):
+    # ── STARTUP ────────────────────────────────────────────────────────────────
+    async def run(self):
         await self.bot.start(bot_token=FREE_BOT_TOKEN)
-        session_str = self.bot.session.save()
+        sess = self.bot.session.save()
         if not os.getenv('BOT_SESSION_STRING'):
-            print("=" * 60)
-            print("IMPORTANT: Save this as BOT_SESSION_STRING in Railway env vars:")
-            print(session_str)
-            print("=" * 60)
-        print("✓ Uzeron Free Bot started")
-        self.register_handlers()
-        asyncio.create_task(self.branding_checker())
-        print("✓ Free Bot is live!")
+            print("="*60, "\nBOT_SESSION_STRING:\n", sess, "\n"+"="*60)
+        self.db.init_db()
+        self._reg()
+        asyncio.create_task(self._brand_loop())
+        print("✅ Uzeron Free Bot live!")
         await self.bot.run_until_disconnected()
 
-    # ── branding checker (unchanged) ─────────────────────────────────────────
-    async def branding_checker(self):
+    # ── BRANDING LOOP ─────────────────────────────────────────────────────────
+    async def _brand_loop(self):
         while True:
             await asyncio.sleep(1800)
             try:
-                users = self.db.get_all_users()
-                for uid, username in users:
-                    user = self.db.get_user(uid)
-                    if not user or not user[4]:
-                        continue
-                    if not user[11]:
-                        continue
-                    asyncio.create_task(self.verify_branding(uid, user))
-            except Exception as e:
-                print(f"Branding checker error: {e}")
+                for uid,_ in self.db.all_users():
+                    u = self.db.get_user(uid)
+                    if u and u[4] and u[11]:
+                        asyncio.create_task(self._verify_brand(uid, u))
+            except Exception as e: print(f"[brand_loop] {e}")
 
-    async def verify_branding(self, uid, user):
+    async def _verify_brand(self, uid, user):
+        cl = None
         try:
-            user_client = TelegramClient(
-                StringSession(user[4]), BOT_API_ID, BOT_API_HASH)
-            await user_client.connect()
-            if not await user_client.is_user_authorized():
-                await user_client.disconnect()
-                return
-            me = await user_client.get_me()
-            await user_client.disconnect()
-            last_name = me.last_name or ""
-            if FREE_BRANDING_LASTNAME not in last_name:
-                count = self.db.add_warning(uid)
-                warnings_left = FREE_WARNINGS_BEFORE_BAN - count
-                if count >= FREE_WARNINGS_BEFORE_BAN:
-                    if uid in self.tasks:
-                        self.tasks[uid].cancel()
-                        del self.tasks[uid]
-                    self.db.set_campaign_status(uid, 0)
+            cl = TelegramClient(StringSession(user[4]), BOT_API_ID, BOT_API_HASH)
+            await cl.connect()
+            if not await cl.is_user_authorized(): return
+            me = await cl.get_me()
+            if FREE_BRANDING_LASTNAME not in (me.last_name or ""):
+                n    = self.db.add_warning(uid)
+                left = FREE_WARNINGS_BEFORE_BAN - n
+                if n >= FREE_WARNINGS_BEFORE_BAN:
+                    self._stop_campaign(uid)
                     send_msg(uid,
-                             "🚫 <b>Account Banned from Free Tier!</b>\n\n"
-                             "You removed the required branding from your account.\n\n"
-                             "After 3 warnings your access has been permanently revoked.\n\n"
-                             f"To continue using our service, upgrade to premium:\n"
-                             f"👤 {CONTACT_USERNAME}",
-                             upgrade_keyboard())
-                    self.logger.send_log(uid, f"🚫 User {uid} banned for removing branding")
+                        "🚫 <b>Banned from Free Tier!</b>\n\n"
+                        "You removed required branding 3 times.\n\n"
+                        f"Upgrade to continue: {CONTACT_USERNAME}", kb_upgrade())
+                    self.log.log(uid, f"🚫 Banned (branding) {uid}")
                 else:
-                    user = self.db.get_user(uid)
-                    await self.set_branding(uid, user)
+                    await self._apply_brand(cl, me)
                     send_msg(uid,
-                             f"⚠️ <b>Warning {count}/{FREE_WARNINGS_BEFORE_BAN} — Branding Removed!</b>\n\n"
-                             f"You removed the required last name branding.\n\n"
-                             f"It has been re-added automatically.\n\n"
-                             f"⚠️ <b>{warnings_left} warning(s) left before ban!</b>\n\n"
-                             f"Or upgrade to remove branding requirement:",
-                             upgrade_keyboard())
-        except Exception as e:
-            print(f"Branding verify error for {uid}: {e}")
+                        f"⚠️ <b>Branding Warning {n}/{FREE_WARNINGS_BEFORE_BAN}</b>\n\n"
+                        "Branding was re-added automatically.\n"
+                        f"⚠️ <b>{left} warning(s) left before ban!</b>", kb_upgrade())
+        except Exception as e: print(f"[verify_brand {uid}] {e}")
+        finally:
+            if cl:
+                try: await cl.disconnect()
+                except: pass
 
-    async def set_branding(self, uid, user):
+    async def _apply_brand(self, cl, me=None):
+        from telethon.tl.functions.account import UpdateProfileRequest
+        if me is None: me = await cl.get_me()
+        cur = me.last_name or ""
+        if FREE_BRANDING_LASTNAME not in cur:
+            await cl(UpdateProfileRequest(last_name=f"{cur} {FREE_BRANDING_LASTNAME}".strip(),
+                                          about=FREE_BRANDING_BIO))
+
+    async def _set_brand_for(self, uid, session) -> bool:
+        cl = None
         try:
-            user_client = TelegramClient(
-                StringSession(user[4]), BOT_API_ID, BOT_API_HASH)
-            await user_client.connect()
-            if not await user_client.is_user_authorized():
-                await user_client.disconnect()
-                print(f"Set branding: user {uid} not authorized")
-                return False
-            me = await user_client.get_me()
-            current_last = me.last_name or ""
-            if FREE_BRANDING_LASTNAME not in current_last:
-                new_last = f"{current_last} {FREE_BRANDING_LASTNAME}".strip()
-                from telethon.tl.functions.account import UpdateProfileRequest
-                await user_client(UpdateProfileRequest(
-                    last_name=new_last,
-                    about=FREE_BRANDING_BIO
-                ))
-            await user_client.disconnect()
+            cl = TelegramClient(StringSession(session), BOT_API_ID, BOT_API_HASH)
+            await cl.connect()
+            if not await cl.is_user_authorized(): return False
+            await self._apply_brand(cl)
             self.db.set_branding(uid, 1)
             return True
-        except Exception as e:
-            print(f"Set branding error for {uid}: {e}")
-            try:
-                await user_client.disconnect()
-            except:
-                pass
-            return False
-
-    # ── handler registration ──────────────────────────────────────────────────
-    def register_handlers(self):
-
-        @self.bot.on(events.NewMessage(pattern='/addcode'))
-        async def addcode(event):
-            if event.sender_id not in ADMINS: return
-            await event.reply("❌ Use the premium bot to add codes.")
-
-        @self.bot.on(events.NewMessage(pattern='/users'))
-        async def users(event):
-            if event.sender_id not in ADMINS: return
-            users_list = self.db.get_all_users()
-            if not users_list:
-                await event.reply("👥 No free users yet")
-                return
-            msg = f"👥 <b>Free Users ({len(users_list)}):</b>\n\n"
-            for uid, uname in users_list:
-                msg += f"• {'@'+uname if uname else 'ID:'+str(uid)}\n"
-            await event.reply(msg, parse_mode='html')
-
-        @self.bot.on(events.NewMessage(pattern='/ban'))
-        async def ban(event):
-            if event.sender_id not in ADMINS: return
-            try:
-                uid = int(event.message.text.split()[1])
-                self.db.ban_user(uid)
-                if uid in self.tasks:
-                    self.tasks[uid].cancel()
-                    del self.tasks[uid]
-                await event.reply(f"✅ User {uid} banned from free tier")
-                try:
-                    send_msg(uid,
-                             "🚫 <b>You have been banned from the free tier.</b>\n\n"
-                             f"Contact {CONTACT_USERNAME} for more info.",
-                             upgrade_keyboard())
+        except Exception as e: print(f"[set_brand {uid}] {e}"); return False
+        finally:
+            if cl:
+                try: await cl.disconnect()
                 except: pass
-            except:
-                await event.reply("❌ Usage: /ban USER_ID")
 
-        @self.bot.on(events.NewMessage(pattern='/stats'))
-        async def stats(event):
-            if event.sender_id not in ADMINS: return
-            total   = len(self.db.get_all_users())
-            running = len(self.tasks)
-            await event.reply(
-                f"📊 <b>Free Bot Statistics</b>\n\n"
-                f"👥 Total Free Users: {total}\n"
-                f"🚀 Running Campaigns: {running}",
-                parse_mode='html')
+    # ── STOP CAMPAIGN (sync safe) ──────────────────────────────────────────────
+    def _stop_campaign(self, uid):
+        if uid in self.tasks:
+            self.tasks[uid].cancel()
+            del self.tasks[uid]
+        if uid in self.start_times:
+            elapsed = int((datetime.now() - self.start_times[uid]).total_seconds())
+            self.db.add_runtime(uid, elapsed)
+            del self.start_times[uid]
+        self.db.set_active(uid, 0)
 
-        @self.bot.on(events.NewMessage(pattern='/start'))
-        async def start(event):
-            uid      = event.sender_id
-            username = event.sender.username
+    async def _abort_login(self, uid):
+        st = self.login_st.pop(uid, None)
+        if st and st.get('client'):
+            try: await st['client'].disconnect()
+            except: pass
+
+    # ── REGISTER HANDLERS ──────────────────────────────────────────────────────
+    def _reg(self):
+        bot = self.bot
+
+        # ── ADMIN ──────────────────────────────────────────────────────────────
+        @bot.on(events.NewMessage(pattern='/ban'))
+        async def cmd_ban(e):
+            if e.sender_id not in ADMINS: return
+            parts = e.message.text.split()
+            if len(parts) < 2: await e.reply("Usage: /ban USER_ID"); return
+            try:
+                t = int(parts[1]); self.db.ban_user(t); self._stop_campaign(t)
+                await e.reply(f"✅ Banned {t}")
+                send_msg(t, f"🚫 <b>Banned from free tier.</b>\nContact {CONTACT_USERNAME}.", kb_upgrade())
+            except Exception as ex: await e.reply(f"❌ {ex}")
+
+        @bot.on(events.NewMessage(pattern='/users'))
+        async def cmd_users(e):
+            if e.sender_id not in ADMINS: return
+            ul = self.db.all_users()
+            lines = "\n".join(f"• {'@'+u if u else str(i)}" for i,u in ul)
+            await e.reply(f"👥 <b>Users ({len(ul)}):</b>\n\n{lines}", parse_mode='html')
+
+        @bot.on(events.NewMessage(pattern='/stats'))
+        async def cmd_stats(e):
+            if e.sender_id not in ADMINS: return
+            await e.reply(f"📊 Users: {len(self.db.all_users())} | Running: {len(self.tasks)}", parse_mode='html')
+
+        # ── /start ─────────────────────────────────────────────────────────────
+        @bot.on(events.NewMessage(pattern='/start'))
+        async def cmd_start(e):
+            uid, uname = e.sender_id, e.sender.username
             if self.db.is_banned(uid):
-                send_msg(uid,
-                         "🚫 <b>You are banned from the free tier.</b>\n\n"
-                         "You removed required branding 3 times.\n\n"
-                         f"Upgrade to premium to continue:\n{CONTACT_USERNAME}",
-                         upgrade_keyboard())
-                return
-            # ── Force-join gate ───────────────────────────────────────────────
-            if not check_user_joined(uid):
-                send_msg(uid, force_join_text(), force_join_keyboard())
-                return
-            # ─────────────────────────────────────────────────────────────────
-            self.db.register_user(uid, username)
-            user    = self.db.get_user(uid)
-            runtime = self.db.get_runtime_today(uid)
-            send_msg(uid, dashboard_text(user, runtime), dashboard_keyboard())
+                send_msg(uid, "🚫 <b>You are banned.</b>\nUpgrade to continue.", kb_upgrade()); return
+            joined = await asyncio.get_event_loop().run_in_executor(None, check_joined_sync, uid)
+            if not joined:
+                send_msg(uid, txt_force_join(), kb_force_join()); return
+            self.db.register_user(uid, uname)
+            u = self.db.get_user(uid)
+            send_msg(uid, txt_dashboard(u, self.db.get_runtime(uid)), kb_dashboard())
 
-        # ── CALLBACK HANDLER ─────────────────────────────────────────────────
-        @self.bot.on(events.CallbackQuery())
-        async def callbacks(event):
+        # ── /cancel ────────────────────────────────────────────────────────────
+        @bot.on(events.NewMessage(pattern='/cancel'))
+        async def cmd_cancel(e):
+            uid = e.sender_id
+            self.pending_msg.discard(uid)
+            await self._abort_login(uid)
+            u = self.db.get_user(uid)
+            send_msg(uid, txt_dashboard(u, self.db.get_runtime(uid) if u else 0), kb_dashboard())
+
+        # ── CALLBACKS ──────────────────────────────────────────────────────────
+        @bot.on(events.CallbackQuery())
+        async def on_cb(event):
             uid  = event.sender_id
-            data = event.data.decode('utf-8')
-            await event.answer()
+            data = event.data.decode()
             mid  = event.query.msg_id
+            cbid = str(event.query.query_id)
+
+            # Answer callback immediately (removes spinner) — non-blocking
+            _tg("answerCallbackQuery", callback_query_id=cbid)
 
             if self.db.is_banned(uid):
-                await event.answer("🚫 You are banned!", alert=True)
-                return
+                _tg("answerCallbackQuery", callback_query_id=cbid,
+                    text="🚫 You are banned!", show_alert=True); return
 
-            user    = self.db.get_user(uid)
-            runtime = self.db.get_runtime_today(uid) if user else 0
+            u  = self.db.get_user(uid)
+            rt = self.db.get_runtime(uid) if u else 0
 
-            # ── standard dashboard buttons (unchanged) ────────────────────
+            # ── force-join check ────────────────────────────────────────────
             if data == 'check_join':
-                # User claims they've joined — re-verify
-                if not check_user_joined(uid):
+                joined = await asyncio.get_event_loop().run_in_executor(None, check_joined_sync, uid)
+                if not joined:
                     edit_msg(uid, mid,
-                             "❌ <b>Not joined yet!</b>\n\n"
-                             "Please join the channel first, then tap <b>I've Joined</b>.",
-                             force_join_keyboard())
-                    return
-                # Joined — register and show dashboard
-                self.db.register_user(uid, getattr(
-                    await self.bot.get_entity(uid), 'username', None))
-                user    = self.db.get_user(uid)
-                runtime = self.db.get_runtime_today(uid) if user else 0
-                edit_msg(uid, mid, dashboard_text(user, runtime), dashboard_keyboard())
+                        "❌ <b>Not joined yet!</b>\n\n"
+                        "Please join <b>both</b> channels, then tap <b>I've Joined</b>.",
+                        kb_force_join()); return
+                self.db.register_user(uid, getattr(event.sender, 'username', None))
+                u  = self.db.get_user(uid)
+                rt = self.db.get_runtime(uid) if u else 0
+                edit_msg(uid, mid, txt_dashboard(u, rt), kb_dashboard()); return
 
-            elif data == 'dashboard':
-                edit_msg(uid, mid, dashboard_text(user, runtime), dashboard_keyboard())
-
-            elif data == 'free_info':
-                edit_msg(uid, mid, welcome_text(), back_keyboard())
-
-            elif data == 'upgrade':
-                edit_msg(uid, mid, upgrade_text(), upgrade_keyboard())
-
-            elif data == 'delay_info':
-                await event.answer(
-                    "⏱️ Free plan: 60s message delay, 10min cycle delay\n"
-                    "Upgrade to Premium for custom delays!",
-                    alert=True)
+            # ── dashboard ────────────────────────────────────────────────────
+            if   data == 'dashboard':
+                edit_msg(uid, mid, txt_dashboard(u, rt), kb_dashboard())
 
             elif data == 'account':
-                phone     = user[1] if user and user[1] else "Not connected"
-                connected = "✅  Connected"   if user and user[4]  else "❌  Not connected"
-                branding  = "✅  Active"      if user and user[11] else "⏳  Pending"
+                phone = u[1] if u and u[1] else "Not connected"
+                conn  = "✅  Connected"  if u and u[4]  else "❌  Not connected"
+                brand = "✅  Active"     if u and u[11] else "⏳  Pending"
                 edit_msg(uid, mid,
-                         "👤 <b>My Account</b>\n"
-                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
-                         f"📱  <b>Phone</b>     <code>{phone}</code>\n"
-                         f"🔗  <b>Status</b>    {connected}\n"
-                         f"🏷   <b>Branding</b>  {branding}\n\n"
-                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰",
-                         make_keyboard([
-                             [{"text": "🔑 Login",   "callback_data": "login"},
-                              {"text": "🚪 Logout",  "callback_data": "logout"}],
-                             [{"text": "🏠 Back to Dashboard", "callback_data": "dashboard"}]
-                         ]))
+                    "👤 <b>My Account</b>\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+                    f"📱  <b>Phone</b>     <code>{phone}</code>\n"
+                    f"🔗  <b>Status</b>   {conn}\n"
+                    f"🏷   <b>Branding</b> {brand}\n\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰",
+                    kb([[{"text":"🔑 Login","callback_data":"login"},
+                         {"text":"🚪 Logout","callback_data":"logout"}],
+                        [{"text":"🏠 Back to Dashboard","callback_data":"dashboard"}]]))
 
             elif data == 'status':
-                s = "🟢  Running" if user and user[6] else "🔴  Stopped"
-                msg_preview = (
-                    (user[5][:60] + '…') if user and user[5] and len(user[5]) > 60
-                    else (user[5] if user else "Not set") or "Not set"
-                )
-                hours_used = runtime / 3600
-                bar_filled = int((hours_used / 8) * 10)
-                bar = "█" * bar_filled + "░" * (10 - bar_filled)
+                h_used = rt/3600
+                filled = min(10, int(h_used/8*10))
+                bar    = "█"*filled+"░"*(10-filled)
+                s      = "🟢  Running" if u and u[6] else "🔴  Stopped"
+                prev   = (u[5][:60]+"…" if u and u[5] and len(u[5])>60
+                          else (u[5] if u and u[5] else "Not set"))
                 edit_msg(uid, mid,
-                         "📊 <b>Campaign Status</b>\n"
-                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
-                         f"📱  <b>Account</b>     <code>{user[1] if user and user[1] else 'Not set'}</code>\n"
-                         f"✉️   <b>Message</b>     <i>{msg_preview}</i>\n"
-                         f"📡  <b>Status</b>      {s}\n"
-                         f"🔢  <b>Max Groups</b>  {FREE_MAX_GROUPS}\n\n"
-                         f"⏳  <b>Runtime Today</b>\n"
-                         f"     [{bar}]  {hours_used:.1f}h / 8h\n\n"
-                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰",
-                         back_keyboard())
+                    "📊 <b>Campaign Status</b>\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+                    f"📱  <b>Account</b>    <code>{u[1] if u and u[1] else 'Not set'}</code>\n"
+                    f"✉️   <b>Message</b>   <i>{prev}</i>\n"
+                    f"📡  <b>Status</b>    {s}\n"
+                    f"🔢  <b>Max Groups</b> {FREE_MAX_GROUPS}\n\n"
+                    f"⏳  <b>Runtime Today</b>\n     [{bar}]  {h_used:.1f}h / 8h\n\n"
+                    "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰", kb_back())
+
+            elif data == 'upgrade':
+                edit_msg(uid, mid, txt_upgrade(), kb_upgrade())
+
+            elif data == 'delay_info':
+                _tg("answerCallbackQuery", callback_query_id=cbid,
+                    text="⏱ 60s delay · 10min cycle\nUpgrade for custom delays!", show_alert=True)
 
             elif data == 'setmessage':
-                self.pending_message[uid] = True
+                self.pending_msg.add(uid)
                 edit_msg(uid, mid,
-                         "✍️ <b>Set Your Ad Message</b>\n"
-                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
-                         "Send your promotional message now.\n"
-                         "It will be sent to all your groups.\n\n"
-                         "💡 <i>Tip: Keep it short and clear for best results</i>\n\n"
-                         "Type /cancel to go back\n"
-                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰",
-                         make_keyboard([[{"text": "❌ Cancel",
-                                          "callback_data": "dashboard"}]]))
+                    "✍️ <b>Set Your Ad Message</b>\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+                    "Send your promotional message now.\n"
+                    "It will be sent to all your joined groups.\n\n"
+                    "💡 <i>Keep it short & punchy for best results</i>\n\n"
+                    "Type /cancel to go back\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰",
+                    kb([[{"text":"❌ Cancel","callback_data":"dashboard"}]]))
 
             elif data == 'startcampaign':
-                if not user or not user[4]:
-                    await event.answer("❌ Login first!", alert=True)
-                    return
-                if not user[5]:
-                    await event.answer("❌ Set your ad message first!", alert=True)
-                    return
+                if not u or not u[4]:
+                    _tg("answerCallbackQuery",callback_query_id=cbid,text="❌ Login first!",show_alert=True); return
+                if not u[5]:
+                    _tg("answerCallbackQuery",callback_query_id=cbid,text="❌ Set your ad message first!",show_alert=True); return
                 if uid in self.tasks:
-                    await event.answer("⚠️ Campaign already running!", alert=True)
-                    return
-                runtime = self.db.get_runtime_today(uid)
-                if runtime >= FREE_MAX_RUNTIME:
+                    _tg("answerCallbackQuery",callback_query_id=cbid,text="⚠️ Already running!",show_alert=True); return
+                if rt >= FREE_MAX_RUNTIME:
                     edit_msg(uid, mid,
-                             "⏰ <b>Daily Limit Reached!</b>\n\n"
-                             "You've used your 8 hour free daily limit.\n\n"
-                             "⏳ Come back tomorrow or upgrade to Premium\nfor unlimited runtime!",
-                             upgrade_keyboard())
-                    return
-                self.db.set_campaign_status(uid, 1)
-                self.campaign_start_times[uid] = datetime.now()
-                task = asyncio.create_task(self.run_campaign(uid))
-                self.tasks[uid] = task
-                self.logger.send_log(uid, f"🆓 Free campaign started by {user[1]}")
-                edit_msg(uid, mid,
-                         dashboard_text(self.db.get_user(uid), runtime),
-                         dashboard_keyboard())
+                        "⏰ <b>Daily Limit Reached!</b>\n\nUpgrade for unlimited runtime!", kb_upgrade()); return
+                self.db.set_active(uid, 1)
+                self.start_times[uid] = datetime.now()
+                self.tasks[uid] = asyncio.create_task(self._campaign(uid))
+                self.log.log(uid, f"🆓 Campaign start: {u[1]}")
+                edit_msg(uid, mid, txt_dashboard(self.db.get_user(uid), rt), kb_dashboard())
                 send_msg(uid,
-                         "🚀 <b>Campaign Started!</b>\n"
-                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
-                         f"🔢  Groups:       <b>{FREE_MAX_GROUPS} max</b>\n"
-                         f"⏱   Msg Delay:  <b>{FREE_MSG_DELAY}s</b>\n"
-                         f"🔄  Cycle:          <b>{FREE_CYCLE_DELAY//60} min</b>\n"
-                         f"⏳  Daily Limit: <b>8 hours</b>\n\n"
-                         "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n"
-                         "💎 <i>Upgrade for unlimited access!</i>")
+                    "🚀 <b>Campaign Started!</b>\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+                    f"🔢  Groups:       <b>{FREE_MAX_GROUPS} max</b>\n"
+                    f"⏱   Msg Delay:  <b>{FREE_MSG_DELAY}s</b>\n"
+                    f"🔄  Cycle:          <b>{FREE_CYCLE_DELAY//60}m</b>\n"
+                    f"⏳  Daily Limit: <b>8 hours</b>\n\n"
+                    "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n💎 <i>Upgrade for unlimited!</i>")
 
             elif data == 'stopcampaign':
                 if uid not in self.tasks:
-                    await event.answer("⚠️ No campaign running!", alert=True)
-                    return
-                self.db.set_campaign_status(uid, 0)
-                self.tasks[uid].cancel()
-                del self.tasks[uid]
-                if uid in self.campaign_start_times:
-                    elapsed = (datetime.now() -
-                               self.campaign_start_times[uid]).total_seconds()
-                    self.db.add_runtime(uid, int(elapsed))
-                    del self.campaign_start_times[uid]
-                self.logger.send_log(uid, "🛑 Free campaign stopped")
-                edit_msg(uid, mid,
-                         dashboard_text(self.db.get_user(uid),
-                                        self.db.get_runtime_today(uid)),
-                         dashboard_keyboard())
+                    _tg("answerCallbackQuery",callback_query_id=cbid,text="⚠️ No campaign running!",show_alert=True); return
+                self._stop_campaign(uid)
                 send_msg(uid, "🛑 <b>Campaign Stopped!</b>")
+                edit_msg(uid, mid, txt_dashboard(self.db.get_user(uid), self.db.get_runtime(uid)), kb_dashboard())
 
-            # ── LOGIN — opens phone-number prompt (NO api id/hash step) ──────
             elif data == 'login':
-                if user and user[4]:
-                    await event.answer("✅ Already logged in!", alert=True)
-                    return
-                self.login_states[uid] = {'step': 'waiting_phone'}
+                if u and u[4]:
+                    _tg("answerCallbackQuery",callback_query_id=cbid,text="✅ Already logged in!",show_alert=True); return
+                self.login_st[uid] = {'step':'phone'}
                 edit_msg(uid, mid,
-                         "🔑 <b>Login to Your Telegram Account</b>\n\n"
-                         "📱 Send your phone number with country code:\n"
-                         "Example: <code>+917239879045</code>\n\n"
-                         "<i>Type /cancel to go back</i>",
-                         make_keyboard([[{"text": "❌ Cancel",
-                                          "callback_data": "cancel_login"}]]))
+                    "🔑 <b>Login to Your Telegram Account</b>\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+                    "📱 Send your phone number with country code:\n"
+                    "Example: <code>+917239879045</code>\n\n"
+                    "Type /cancel to go back\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰", kb_cancel())
 
             elif data == 'cancel_login':
-                if uid in self.login_states:
-                    try:
-                        c = self.login_states[uid].get('client')
-                        if c: await c.disconnect()
-                    except: pass
-                    del self.login_states[uid]
-                edit_msg(uid, mid, dashboard_text(user, runtime), dashboard_keyboard())
+                await self._abort_login(uid)
+                edit_msg(uid, mid, txt_dashboard(u, rt), kb_dashboard())
 
             elif data == 'logout':
-                if uid in self.tasks:
-                    self.tasks[uid].cancel()
-                    del self.tasks[uid]
+                self._stop_campaign(uid)
                 self.db.logout_user(uid)
-                edit_msg(uid, mid,
-                         dashboard_text(self.db.get_user(uid), 0),
-                         dashboard_keyboard())
                 send_msg(uid, "✅ <b>Logged out successfully!</b>")
+                edit_msg(uid, mid, txt_dashboard(self.db.get_user(uid), 0), kb_dashboard())
 
-            # ── OTP KEYPAD CALLBACKS ─────────────────────────────────────────
-            elif data == 'otp_noop':
-                # display row tap — do nothing
-                pass
+            # ── OTP keypad ───────────────────────────────────────────────────
+            elif data == 'otp_noop': pass
 
             elif data.startswith('otp_'):
-                await self._handle_otp_keypad(event, uid, mid, data)
+                await self._otp_tap(event, uid, mid, cbid, data)
 
-        # ── TEXT MESSAGE HANDLER ──────────────────────────────────────────────
-        @self.bot.on(events.NewMessage())
-        async def global_handler(event):
+        # ── TEXT HANDLER ───────────────────────────────────────────────────────
+        @bot.on(events.NewMessage())
+        async def on_text(event):
             uid  = event.sender_id
-            text = event.message.text
-            if not text: return
+            text = (event.message.text or "").strip()
+            if not text or text.startswith('/'): return
             if self.db.is_banned(uid): return
 
-            if text.strip() == '/cancel':
-                if uid in self.pending_message:
-                    del self.pending_message[uid]
-                if uid in self.login_states:
-                    try:
-                        c = self.login_states[uid].get('client')
-                        if c: await c.disconnect()
-                    except: pass
-                    del self.login_states[uid]
-                user    = self.db.get_user(uid)
-                runtime = self.db.get_runtime_today(uid) if user else 0
-                send_msg(uid, dashboard_text(user, runtime), dashboard_keyboard())
-                return
-
-            if uid in self.pending_message and not text.startswith('/'):
-                del self.pending_message[uid]
-                self.db.set_promo_message(uid, text)
+            if uid in self.pending_msg:
+                self.pending_msg.discard(uid)
+                self.db.set_promo(uid, text)
+                prev = text[:100]+("…" if len(text)>100 else "")
                 send_msg(uid,
-                         "✅ <b>Ad Message Saved!</b>\n\n"
-                         f"📝 Preview:\n<i>{text[:100]}{'...' if len(text) > 100 else ''}</i>",
-                         make_keyboard([
-                             [{"text": "🚀 Start Campaign",
-                               "callback_data": "startcampaign"}],
-                             [{"text": "🏠 Dashboard", "callback_data": "dashboard"}]
-                         ]))
-                return
+                    f"✅ <b>Ad Message Saved!</b>\n\n📝 Preview:\n<i>{prev}</i>",
+                    kb([[{"text":"🚀 Start Campaign","callback_data":"startcampaign"}],
+                        [{"text":"🏠 Dashboard","callback_data":"dashboard"}]])); return
 
-            if uid in self.login_states:
-                await self.handle_login_text(event, uid, text)
+            if uid in self.login_st:
+                await self._login_text(uid, text)
 
-    # ── OTP KEYPAD HANDLER ────────────────────────────────────────────────────
-    async def _handle_otp_keypad(self, event, uid, mid, data):
-        """
-        Handles all otp_ callback_data values.
-        State dict at this point must have: step='waiting_code', 'otp_digits' list.
-        """
-        state = self.login_states.get(uid)
-        if not state or state.get('step') != 'waiting_code':
-            return  # stale tap — ignore
-
-        digits: list = state.setdefault('otp_digits', [])
+    # ── OTP KEYPAD ─────────────────────────────────────────────────────────────
+    async def _otp_tap(self, event, uid, mid, cbid, data):
+        st = self.login_st.get(uid)
+        if not st or st.get('step') != 'otp': return
+        digits = st.setdefault('digits', [])
 
         if data == 'otp_back':
-            if digits:
-                digits.pop()
+            if digits: digits.pop()
         elif data == 'otp_submit':
             code = ''.join(digits)
             if not code:
-                await event.answer("⚠️ Enter the OTP first!", alert=True)
-                return
-            # submit the code
-            await self._submit_otp(uid, mid, state, code)
-            return
+                _tg("answerCallbackQuery", callback_query_id=cbid,
+                    text="⚠️ Enter the OTP first!", show_alert=True); return
+            await self._submit_otp(uid, mid, st, code); return
         else:
-            # otp_0 … otp_9
-            digit = data.split('_')[1]
-            if len(digits) < 6:   # Telegram OTPs are 5-6 digits max
-                digits.append(digit)
+            d = data.split('_',1)[1]
+            if len(digits) < 6: digits.append(d)
 
-        # refresh keypad display
-        display = ''.join(digits)
         edit_msg(uid, mid,
-                 "📨 <b>Enter your OTP</b>\n\n"
-                 "Tap the digits shown on your Telegram app:\n\n"
-                 "<i>Tap ✅ Submit when done • /cancel to abort</i>",
-                 otp_keypad_keyboard(display))
+            "📨 <b>Enter Your OTP</b>\n\n"
+            "Tap the digits shown in your Telegram app:\n\n"
+            "<i>✅ Submit when done  •  /cancel to abort</i>",
+            kb_otp(''.join(digits)))
 
-    async def _submit_otp(self, uid, mid, state, code):
-        """Try to sign in with the collected OTP digits."""
+    async def _submit_otp(self, uid, mid, st, code):
         try:
-            await state['client'].sign_in(state['phone'], code)
-            await self._complete_login(uid, state)
+            await st['client'].sign_in(st['phone'], code)
+            await self._finish_login(uid, mid, st)
         except SessionPasswordNeededError:
-            state['step'] = 'waiting_password'
-            state['otp_digits'] = []
-            # disconnect keypad message, ask for 2FA via text
+            st['step'] = '2fa'; st['digits'] = []
             edit_msg(uid, mid,
-                     "🔐 <b>Two-Factor Authentication</b>\n\n"
-                     "Your account has 2FA enabled.\n"
-                     "Please <b>type and send</b> your 2FA password:\n\n"
-                     "<i>Type /cancel to abort</i>",
-                     make_keyboard([[{"text": "❌ Cancel",
-                                      "callback_data": "cancel_login"}]]))
+                "🔐 <b>2FA Required</b>\n\n"
+                "Your account has 2FA enabled.\n"
+                "<b>Type and send</b> your 2FA password:\n\n"
+                "Type /cancel to abort", kb_cancel())
         except Exception as e:
-            edit_msg(uid, mid,
-                     f"❌ <b>Invalid OTP!</b>\n\n"
-                     f"Error: <code>{e}</code>\n\n"
-                     "Please try again:",
-                     otp_keypad_keyboard(''))
-            state['otp_digits'] = []
+            st['digits'] = []
+            edit_msg(uid, mid, f"❌ <b>Wrong OTP!</b>\n<code>{e}</code>\n\nTry again:", kb_otp(''))
 
-    # ── TEXT-BASED LOGIN STEPS (phone + 2FA password) ─────────────────────────
-    async def handle_login_text(self, event, uid, text):
-        """Handles only typed messages during login: phone number and 2FA password."""
-        if text.startswith('/'): return
+    # ── LOGIN TEXT STEPS ───────────────────────────────────────────────────────
+    async def _login_text(self, uid, text):
+        st = self.login_st.get(uid)
+        if not st: return
+        step = st['step']
 
-        state = self.login_states[uid]
-        step  = state.get('step')
-
-        # STEP 1 — phone number (typed)
-        if step == 'waiting_phone':
-            if not text.startswith('+'):
-                send_msg(uid,
-                         "❌ Phone must start with country code.\n"
-                         "Example: <code>+917239879045</code>")
-                return
+        if step == 'phone':
+            phone = text.replace(' ','')
+            if not phone.startswith('+'):
+                send_msg(uid, "❌ Include country code.\nExample: <code>+917239879045</code>", kb_cancel()); return
             try:
-                user_client = TelegramClient(
-                    StringSession(), BOT_API_ID, BOT_API_HASH)
-                await user_client.connect()
-                await user_client.send_code_request(text.strip())
-                state['client']     = user_client
-                state['phone']      = text.strip()
-                state['step']       = 'waiting_code'
-                state['otp_digits'] = []
-                # show keypad — send a NEW message (user typed, so no mid to edit)
+                cl = TelegramClient(StringSession(), BOT_API_ID, BOT_API_HASH)
+                await cl.connect()
+                await cl.send_code_request(phone)
+                st.update({'client':cl,'phone':phone,'step':'otp','digits':[]})
                 send_msg(uid,
-                         "📨 <b>OTP Sent!</b>\n\n"
-                         "Use the keypad below to enter the verification code\n"
-                         "received on your Telegram app:\n\n"
-                         "<i>Tap ✅ Submit when done • /cancel to abort</i>",
-                         otp_keypad_keyboard(''))
+                    "📨 <b>OTP Sent!</b>\n\n"
+                    "Use the keypad to enter your verification code:\n\n"
+                    "<i>✅ Submit when done  •  /cancel to abort</i>",
+                    kb_otp(''))
             except Exception as e:
-                send_msg(uid, f"❌ Error sending OTP: <code>{e}</code>\n\nPlease try again.")
-                del self.login_states[uid]
+                send_msg(uid, f"❌ Failed to send OTP: <code>{e}</code>", kb_cancel())
+                self.login_st.pop(uid, None)
 
-        # STEP 3 — 2FA password (typed, only if flagged by SessionPasswordNeededError)
-        elif step == 'waiting_password':
+        elif step == '2fa':
             try:
-                await state['client'].sign_in(password=text)
-                await self._complete_login(uid, state)
+                await st['client'].sign_in(password=text)
+                await self._finish_login(uid, None, st)
             except Exception as e:
-                send_msg(uid,
-                         f"❌ <b>2FA failed:</b> <code>{e}</code>\n\n"
-                         "Please try again or /cancel to abort.",
-                         make_keyboard([[{"text": "❌ Cancel",
-                                          "callback_data": "cancel_login"}]]))
-                await state['client'].disconnect()
-                del self.login_states[uid]
+                send_msg(uid, f"❌ 2FA failed: <code>{e}</code>\n\nTry again or /cancel.", kb_cancel())
+                await self._abort_login(uid)
 
-    # ── COMPLETE LOGIN (unchanged logic) ──────────────────────────────────────
-    async def _complete_login(self, uid, state):
-        session = state['client'].session.save()
-        phone   = state['phone']
-        self.db.save_session(uid, phone, BOT_API_ID, BOT_API_HASH, session)
-        await state['client'].disconnect()
-        del self.login_states[uid]
-        self.logger.send_log(uid, f"✅ Free user logged in: {phone}")
-        user = self.db.get_user(uid)
-        send_msg(uid,
-                 "✅ <b>Login Successful!</b>\n\n"
-                 f"📱 Account: <code>{phone}</code>\n\n"
-                 "🏷️ Setting up required branding on your account...\n"
-                 "<i>This is required for free tier usage.</i>")
-        branding_ok = await self.set_branding(uid, user)
-        if branding_ok:
+    # ── COMPLETE LOGIN ─────────────────────────────────────────────────────────
+    async def _finish_login(self, uid, mid, st):
+        session = st['client'].session.save()
+        phone   = st['phone']
+        try: await st['client'].disconnect()
+        except: pass
+        self.login_st.pop(uid, None)
+        self.db.save_session(uid, phone, session)
+        self.log.log(uid, f"✅ Login: {phone}")
+
+        notice = (f"✅ <b>Login Successful!</b>\n\n📱 <code>{phone}</code>\n\n"
+                  "🏷️ Setting up required branding…")
+        if mid: edit_msg(uid, mid, notice)
+        else:   send_msg(uid, notice)
+
+        ok = await self._set_brand_for(uid, session)
+        if ok:
             send_msg(uid,
-                     "✅ <b>Account Setup Complete!</b>\n\n"
-                     f"🏷️ Branding added to your last name:\n"
-                     f"<code>{FREE_BRANDING_LASTNAME}</code>\n\n"
-                     "⚠️ <b>Do not remove this branding!</b>\n"
-                     f"Removing it 3 times will ban you from free tier.\n\n"
-                     "💎 Upgrade to Premium to remove branding requirement!",
-                     make_keyboard([
-                         [{"text": "💬 Set Ad Message",
-                           "callback_data": "setmessage"}],
-                         [{"text": "🏠 Dashboard", "callback_data": "dashboard"}]
-                     ]))
+                "✅ <b>Account Setup Complete!</b>\n\n"
+                f"🏷️ Branding added: <code>{FREE_BRANDING_LASTNAME}</code>\n\n"
+                "⚠️ <b>Do NOT remove this branding!</b>\n"
+                "3 removals = permanent ban from free tier.\n\n"
+                "💎 Upgrade to remove branding requirement!",
+                kb([[{"text":"✍️ Set Ad Message","callback_data":"setmessage"}],
+                    [{"text":"🏠 Dashboard","callback_data":"dashboard"}]]))
         else:
             send_msg(uid,
-                     "✅ <b>Login Successful!</b>\n\n"
-                     "⚠️ Could not set branding automatically.\n"
-                     f"Please manually add to your last name:\n"
-                     f"<code>{FREE_BRANDING_LASTNAME}</code>",
-                     make_keyboard([[{"text": "🏠 Dashboard",
-                                      "callback_data": "dashboard"}]]))
+                "✅ <b>Login Successful!</b>\n\n"
+                f"⚠️ Add manually to last name:\n<code>{FREE_BRANDING_LASTNAME}</code>", kb_back())
 
-    # ── CAMPAIGN ENGINE (unchanged) ───────────────────────────────────────────
-    async def run_campaign(self, uid):
+    # ── CAMPAIGN ENGINE ────────────────────────────────────────────────────────
+    async def _campaign(self, uid):
+        cl = None
         try:
-            user           = self.db.get_user(uid)
-            phone          = user[1]
-            session_string = user[4]
-            message        = user[5]
+            u     = self.db.get_user(uid)
+            phone = u[1]
+            cl    = TelegramClient(StringSession(u[4]), BOT_API_ID, BOT_API_HASH)
+            await cl.connect()
 
-            user_client = TelegramClient(
-                StringSession(session_string), BOT_API_ID, BOT_API_HASH)
-            await user_client.connect()
+            if not await cl.is_user_authorized():
+                send_msg(uid, "❌ <b>Session expired!</b> Logout and login again.", kb_back())
+                self.db.set_active(uid, 0); return
 
-            if not await user_client.is_user_authorized():
-                send_msg(uid, "❌ <b>Session expired!</b> Please /logout and login again.")
-                self.db.set_campaign_status(uid, 0)
-                await user_client.disconnect()
-                return
-
-            dialogs = await user_client.get_dialogs()
-            groups  = [d for d in dialogs if d.is_group]
-            if len(groups) > FREE_MAX_GROUPS:
-                groups = groups[:FREE_MAX_GROUPS]
+            dialogs = await cl.get_dialogs()
+            groups  = [d for d in dialogs if d.is_group][:FREE_MAX_GROUPS]
 
             if not groups:
-                send_msg(uid, "❌ <b>No groups found!</b>")
-                self.db.set_campaign_status(uid, 0)
-                await user_client.disconnect()
-                return
+                send_msg(uid, "❌ <b>No groups found!</b> Join some groups first.", kb_back())
+                self.db.set_active(uid, 0); return
 
             send_msg(uid,
-                     f"📊 <b>Campaign Ready!</b>\n"
-                     f"▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
-                     f"✅  Groups found:  <b>{len(groups)}</b> / {FREE_MAX_GROUPS}\n"
-                     f"⏱   Msg Delay:    <b>{FREE_MSG_DELAY}s</b>\n"
-                     f"🔄  Cycle Delay:  <b>{FREE_CYCLE_DELAY//60}m</b>\n\n"
-                     f"▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n"
-                     f"🚀 Sending started...")
+                f"📊 <b>Campaign Ready!</b>\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+                f"✅  Groups:      <b>{len(groups)}</b> / {FREE_MAX_GROUPS}\n"
+                f"⏱   Msg Delay: <b>{FREE_MSG_DELAY}s</b>\n"
+                f"🔄  Cycle:        <b>{FREE_CYCLE_DELAY//60}m</b>\n\n🚀 Starting…")
 
-            round_num      = 0
-            campaign_start = datetime.now()
+            t0    = datetime.now()
+            round = 0
 
-            while self.db.get_user(uid)[6]:   # is_active
-                runtime              = self.db.get_runtime_today(uid)
-                elapsed_this_session = (datetime.now() - campaign_start).total_seconds()
-                total_today          = runtime + elapsed_this_session
+            while True:
+                cur = self.db.get_user(uid)
+                if not cur or not cur[6]: break
 
-                if total_today >= FREE_MAX_RUNTIME:
-                    self.db.set_campaign_status(uid, 0)
-                    self.db.add_runtime(uid, int(elapsed_this_session))
-                    if uid in self.campaign_start_times:
-                        del self.campaign_start_times[uid]
+                saved   = self.db.get_runtime(uid)
+                elapsed = (datetime.now() - t0).total_seconds()
+                total   = saved + elapsed
+
+                if total >= FREE_MAX_RUNTIME:
+                    self.db.add_runtime(uid, int(elapsed))
+                    self.start_times.pop(uid, None)
+                    self.db.set_active(uid, 0)
+                    self.tasks.pop(uid, None)
                     send_msg(uid,
-                             "⏰ <b>Daily Limit Reached!</b>\n\n"
-                             "You've used your 8 hour free daily limit.\n\n"
-                             "⏳ Your campaign will resume tomorrow automatically.\n\n"
-                             "💎 Upgrade to Premium for unlimited runtime!",
-                             upgrade_keyboard())
-                    self.logger.send_log(uid, f"⏰ Free limit reached for {phone}")
-                    break
+                        "⏰ <b>Daily Limit Reached!</b>\n\n"
+                        "8hr free limit used. Resumes tomorrow.\n\n"
+                        "💎 Upgrade for unlimited runtime!", kb_upgrade())
+                    self.log.log(uid, f"⏰ Limit reached: {phone}")
+                    return
 
-                round_num += 1
-                sent       = 0
-                failed     = 0
-                user       = self.db.get_user(uid)
-                message    = user[5]
+                round += 1
+                sent, failed = 0, 0
+                msg = self.db.get_user(uid)[5]   # refresh message each round
 
-                for group in groups:
+                for g in groups:
                     if not self.db.get_user(uid)[6]: break
-                    # recalculate elapsed on every iteration so runtime check is accurate
-                    elapsed_now = (datetime.now() - campaign_start).total_seconds()
-                    if runtime + elapsed_now >= FREE_MAX_RUNTIME:
-                        break
+                    # per-group runtime check (accurate)
+                    if saved + (datetime.now()-t0).total_seconds() >= FREE_MAX_RUNTIME: break
                     try:
-                        await user_client.send_message(group.entity, message)
+                        await cl.send_message(g.entity, msg)
                         sent += 1
-                        self.logger.send_log(uid, f"✓ [{phone}] → {group.name}")
+                        self.log.log(uid, f"✓ {phone} → {g.name}")
                         await asyncio.sleep(FREE_MSG_DELAY)
-                    except FloodWaitError as e:
-                        send_msg(uid, f"⚠️ <b>FloodWait!</b> Pausing for {e.seconds}s...")
-                        await asyncio.sleep(e.seconds)
-                    except Exception as e:
+                    except FloodWaitError as fe:
+                        send_msg(uid, f"⚠️ FloodWait — pausing {fe.seconds}s…")
+                        await asyncio.sleep(fe.seconds)
+                    except Exception as ex:
                         failed += 1
-                        print(f"[{uid}] Send error to {group.name}: {e}")
-                        await asyncio.sleep(10)
+                        print(f"[send {uid} {g.name}] {ex}")
+                        await asyncio.sleep(5)
 
-                elapsed_this_session = (datetime.now() - campaign_start).total_seconds()
-                hours_left = max(0, 8 - (runtime + elapsed_this_session) / 3600)
-                bar_f  = int(((8 - hours_left) / 8) * 10)
-                bar    = "█" * bar_f + "░" * (10 - bar_f)
+                elapsed = (datetime.now()-t0).total_seconds()
+                h_left  = max(0.0, 8.0-(saved+elapsed)/3600)
+                filled  = min(10, int((8.0-h_left)/8.0*10))
+                bar     = "█"*filled+"░"*(10-filled)
+
                 send_msg(uid,
-                         f"✅ <b>Round {round_num} Complete!</b>\n"
-                         f"▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
-                         f"📤  Sent:     <b>{sent}</b>\n"
-                         f"❌  Failed:  <b>{failed}</b>\n\n"
-                         f"⏳  Runtime Left\n"
-                         f"     [{bar}]  {hours_left:.1f}h\n\n"
-                         f"🔄  Next round in <b>{FREE_CYCLE_DELAY//60} min</b>\n"
-                         f"▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n"
-                         f"💎 <i>Upgrade for unlimited runtime!</i>",
-                         make_keyboard([
-                             [{"text": "🛑 Stop Campaign", "callback_data": "stopcampaign"}],
-                             [{"text": "💎 Go Premium",    "callback_data": "upgrade"}]
-                         ]))
+                    f"✅ <b>Round {round} Complete!</b>\n▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n"
+                    f"📤  Sent:    <b>{sent}</b>\n❌  Failed: <b>{failed}</b>\n\n"
+                    f"⏳  Runtime Left\n     [{bar}]  {h_left:.1f}h\n\n"
+                    f"🔄  Next round in <b>{FREE_CYCLE_DELAY//60}m</b>\n"
+                    f"▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n💎 <i>Upgrade for unlimited!</i>",
+                    kb([[{"text":"🛑 Stop Campaign","callback_data":"stopcampaign"}],
+                        [{"text":"💎 Go Premium","callback_data":"upgrade"}]]))
+
                 await asyncio.sleep(FREE_CYCLE_DELAY)
 
-            await user_client.disconnect()
-
         except asyncio.CancelledError:
-            print(f"[{uid}] Free campaign cancelled")
-            if uid in self.campaign_start_times:
-                elapsed = (datetime.now() -
-                           self.campaign_start_times[uid]).total_seconds()
-                self.db.add_runtime(uid, int(elapsed))
-                del self.campaign_start_times[uid]
+            print(f"[campaign {uid}] cancelled")
+            # runtime already saved by _stop_campaign
 
         except Exception as e:
-            print(f"[{uid}] Free campaign error: {e}")
-            self.db.set_campaign_status(uid, 0)
-            if uid in self.tasks: del self.tasks[uid]
-            try:
-                send_msg(uid, f"❌ <b>Campaign stopped due to error:</b>\n<code>{e}</code>")
-            except: pass
+            print(f"[campaign {uid}] fatal: {e}")
+            self.db.set_active(uid, 0)
+            self.tasks.pop(uid, None)
+            send_msg(uid, f"❌ <b>Campaign crashed:</b>\n<code>{e}</code>", kb_back())
 
-# ============================================
-# MAIN
-# ============================================
+        finally:
+            if cl:
+                try: await cl.disconnect()
+                except: pass
+            self.tasks.pop(uid, None)
+
+# ── MAIN ───────────────────────────────────────────────────────────────────────
 async def main():
-    print("=" * 50)
-    print(" 🆓 UZERON ADSBOT — Free Tier")
-    print("=" * 50)
-    missing = [v for v in ['API_ID', 'API_HASH', 'FREE_BOT_TOKEN',
-                            'LOGGER_BOT_TOKEN', 'ADMIN_IDS', 'DATABASE_URL']
-               if not os.getenv(v)]
-    if missing:
-        print(f"❌ Missing env vars: {', '.join(missing)}")
-        sys.exit(1)
-    print("✓ All credentials loaded")
-    await UzeronFreeBot().start()
+    print("="*50, "\n  ⚡ UZERON ADSBOT — Free Tier\n"+"="*50)
+    miss = [v for v in ['API_ID','API_HASH','FREE_BOT_TOKEN','LOGGER_BOT_TOKEN','ADMIN_IDS','DATABASE_URL']
+            if not os.getenv(v)]
+    if miss: print(f"❌ Missing: {', '.join(miss)}"); sys.exit(1)
+    print("✅ All env vars loaded")
+    await UzeronFreeBot().run()
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n🆓 Free bot stopped")
-    except Exception as e:
-        print(f"Fatal: {e}")
-        sys.exit(1)
+    try: asyncio.run(main())
+    except KeyboardInterrupt: print("\nStopped.")
+    except Exception as e: print(f"Fatal: {e}"); sys.exit(1)
